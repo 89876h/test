@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Optimized for small/thin symbols.")
+st.markdown("Structure-aware detection: Optimized for nested/complex symbols.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -23,7 +23,7 @@ with st.sidebar:
     match_threshold = st.slider("Match Sensitivity", 0.3, 0.95, 0.6, 0.05)
     
     st.markdown("---")
-    st.markdown("###  Process")
+    st.markdown("### 📋 Process")
     st.markdown("""
     **Step 1:** Upload legend  
     **Step 2:** Auto-extract symbols (left of text)  
@@ -54,7 +54,7 @@ if legend_file:
             row_sums = np.sum(binary, axis=1)
             
             # Identify rows that contain text
-            text_threshold = np.mean(row_sums) * 0.3  # Lowered threshold to catch faint text
+            text_threshold = np.mean(row_sums) * 0.3
             text_rows = np.where(row_sums > text_threshold)[0]
             
             # Group consecutive text rows into bands
@@ -72,20 +72,12 @@ if legend_file:
                     text_bands.append((min(current_band), max(current_band)))
             
             # 2. For EACH text band, find symbols to the LEFT
-            symbols = []
-            marked_img = legend_color.copy()
-            draw = ImageDraw.Draw(marked_img)
+            raw_components = []
             
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-            except:
-                font = ImageFont.load_default()
-            
-            sym_count = 0
             for y1, y2 in text_bands:
-                # Expand band significantly to catch symbols that might be taller than text
-                sy1 = max(0, y1 - 10)
-                sy2 = min(h, y2 + 10)
+                # Expand band significantly
+                sy1 = max(0, y1 - 15)
+                sy2 = min(h, y2 + 15)
                 
                 band_slice = binary[sy1:sy2, :]
                 
@@ -94,63 +86,123 @@ if legend_file:
                 for i in range(1, num_labels):
                     x, y, bw, bh, area = stats[i]
                     
-                    # Skip if component is on the far right (where text lives)
+                    # Skip text area (right side)
                     if x > w * 0.55:  
                         continue
                     
-                    # ✅ FIX: Relaxed thresholds for small/thin electrical symbols
-                    # Area > 10 allows thin lines (e.g., 2px wide x 10px tall = 20px)
-                    # Height > 5 allows small circles
-                    if area < 10 or bw < 4 or bh < 5:
+                    # Skip tiny noise
+                    if area < 5 or bw < 3 or bh < 3:
                         continue
                     
-                    pad = 4
-                    cx1 = max(0, x - pad)
-                    cx2 = min(w, x + bw + pad)
-                    cy1 = max(0, y - pad)
-                    cy2 = min(h, y + bh + pad)
-                    
-                    symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
-                    
-                    # ✅ FIX: Better normalization for tiny symbols
-                    # Instead of forcing 50px height (which blurs tiny icons), 
-                    # we scale up by a factor if they are too small, or keep ratio.
-                    target_h = 60
-                    scale = target_h / max(1, bh)
-                    
-                    # If symbol is very small (<20px), scale it up more aggressively
-                    if bh < 20:
-                        scale = max(scale, 3.0)
-                        
-                    new_w = max(15, int(bw * scale))
-                    new_h = int(bh * scale)
-                    
-                    # Use INTER_CUBIC for better upscaling of small icons
-                    symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                    
-                    symbols.append({
-                        'image': symbol_resized,
-                        'x': cx1, 'y': cy1, 'w': bw, 'h': bh,
-                        'area': area
+                    # Store raw component info
+                    raw_components.append({
+                        'x': x, 'y': y, 'w': bw, 'h': bh, 
+                        'area': area, 'band_y1': sy1, 'band_y2': sy2
                     })
+
+            # ✅ FIX: MERGE NEARBY COMPONENTS (Handles Nested Rectangles)
+            # If two components overlap or are very close, merge them into one bounding box
+            merged_symbols = []
+            used_indices = set()
+            
+            # Sort by X position to process left-to-right
+            raw_components.sort(key=lambda c: c['x'])
+            
+            for i, comp in enumerate(raw_components):
+                if i in used_indices:
+                    continue
+                
+                # Start a new group with current component
+                group = [comp]
+                used_indices.add(i)
+                
+                # Check against all other unused components
+                for j, other in enumerate(raw_components):
+                    if j in used_indices:
+                        continue
                     
-                    draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
-                    sym_count += 1
-                    label = f"S{sym_count}"
-                    bbox = draw.textbbox((cx1, cy1-20), label, font=font)
-                    draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
-                    draw.text((cx1, cy1-20), label, fill='green', font=font)
+                    # Calculate distance between components
+                    # We check if they are roughly in same vertical area and close horizontally
+                    cx1, cy1, cw1, ch1 = comp['x'], comp['y'], comp['w'], comp['h']
+                    cx2, cy2, cw2, ch2 = other['x'], other['y'], other['w'], other['h']
+                    
+                    # Check for overlap or close proximity (gap < 10px)
+                    x_dist = abs(cx1 - cx2)
+                    y_dist = abs(cy1 - cy2)
+                    
+                    # If they are close enough to be part of same symbol
+                    if x_dist < (max(cw1, cw2) + 10) and y_dist < (max(ch1, ch2) + 10):
+                         # Also check if one is inside the other (nested rectangles)
+                         # Or if they share significant vertical space
+                         y_overlap = min(cy1+ch1, cy2+ch2) - max(cy1, cy2)
+                         if y_overlap > 0 or y_dist < 5:
+                             group.append(other)
+                             used_indices.add(j)
+                
+                # Create a unified bounding box for the group
+                min_x = min(c['x'] for c in group)
+                min_y = min(c['y'] for c in group)
+                max_x = max(c['x'] + c['w'] for c in group)
+                max_y = max(c['y'] + c['h'] for c in group)
+                
+                final_w = max_x - min_x
+                final_h = max_y - min_y
+                
+                # Add padding
+                pad = 5
+                cx1 = max(0, min_x - pad)
+                cx2 = min(w, max_x + pad)
+                cy1 = max(0, min_y - pad)
+                cy2 = min(h, max_y + pad)
+                
+                # Crop from original gray image
+                symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
+                
+                # Normalize size
+                target_h = 60
+                scale = target_h / max(1, final_h)
+                if final_h < 20: scale = max(scale, 3.0) # Upscale tiny symbols
+                
+                new_w = max(15, int(final_w * scale))
+                new_h = int(final_h * scale)
+                symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                
+                merged_symbols.append({
+                    'image': symbol_resized,
+                    'x': cx1, 'y': cy1, 'w': final_w, 'h': final_h,
+                    'area': sum(c['area'] for c in group)
+                })
+
+            # Display Results
+            symbols = merged_symbols
+            marked_img = legend_color.copy()
+            draw = ImageDraw.Draw(marked_img)
+            
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+            except:
+                font = ImageFont.load_default()
+            
+            for idx, sym in enumerate(symbols):
+                cx1, cy1 = sym['x'], sym['y']
+                cx2, cy2 = cx1 + sym['w'], cy1 + sym['h']
+                
+                draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
+                label = f"S{idx+1}"
+                bbox = draw.textbbox((cx1, cy1-20), label, font=font)
+                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
+                draw.text((cx1, cy1-20), label, fill='green', font=font)
             
             st.session_state.marked_legend = marked_img
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols")
+            st.success(f"✅ Found {len(symbols)} symbols (Nested shapes merged)")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Only items LEFT of text bands are extracted.")
+            st.caption("Nested rectangles are now grouped as one symbol.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
@@ -172,13 +224,13 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    # ✅ FIX: Robust display using BytesIO buffer
+                    # Robust display using BytesIO buffer
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     
-                    # Scale up for visibility in UI
+                    # Scale up for visibility
                     sym_pil = sym_pil.resize(
-                        (max(sym_pil.width * 2, 40), max(sym_pil.height * 2, 40)), 
+                        (max(sym_pil.width * 2, 50), max(sym_pil.height * 2, 50)), 
                         Image.NEAREST
                     )
                     
@@ -186,7 +238,6 @@ if st.session_state.get('all_symbols'):
                     sym_pil.save(buf, format='PNG')
                     buf.seek(0)
                     
-                    # No width param to avoid internal resize crash
                     st.image(buf)
                     
                     st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
@@ -205,7 +256,7 @@ if st.session_state.get('all_symbols'):
             st.session_state.legend_confirmed = True
             st.success(f"✅ **{len(selected_indices)} receptacles confirmed!**")
         else:
-            st.warning("️ Please select at least one symbol")
+            st.warning("⚠️ Please select at least one symbol")
 
 # ===== STEP 4 & 5: COUNT IN POWER PLAN =====
 if st.session_state.legend_confirmed:
@@ -238,7 +289,6 @@ if st.session_state.legend_confirmed:
                 timg = tmpl['image']
                 th, tw = timg.shape
                 
-                # Wider scale range for small symbols
                 for scale in [0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0]:
                     new_h = int(th * scale)
                     new_w = int(tw * scale)
@@ -330,7 +380,7 @@ if st.session_state.legend_confirmed:
                 st.markdown(f"""
                 <div style="background:#fff5f5; padding:30px; border-radius:15px; 
                             border:4px solid red; text-align:center; margin:20px 0;">
-                    <h2 style="color:#cc0000;"> RECEPTACLES FOUND</h2>
+                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
                     <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
                     <h3 style="color:#cc0000;">Total Count</h3>
                 </div>
