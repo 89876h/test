@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Symbols only, zero alphabets.")
+st.markdown("Structure-aware detection: Optimized for small/thin symbols.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -20,10 +20,10 @@ if 'all_symbols' not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    match_threshold = st.slider("Match Sensitivity", 0.3, 0.95, 0.5, 0.05)
+    match_threshold = st.slider("Match Sensitivity", 0.3, 0.95, 0.6, 0.05)
     
     st.markdown("---")
-    st.markdown("### 📋 Process")
+    st.markdown("###  Process")
     st.markdown("""
     **Step 1:** Upload legend  
     **Step 2:** Auto-extract symbols (left of text)  
@@ -49,12 +49,15 @@ if legend_file:
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
+            # 1. Find TEXT regions using horizontal projection
             binary = (legend_gray < 128).astype(np.uint8)
             row_sums = np.sum(binary, axis=1)
             
-            text_threshold = np.mean(row_sums) * 0.4
+            # Identify rows that contain text
+            text_threshold = np.mean(row_sums) * 0.3  # Lowered threshold to catch faint text
             text_rows = np.where(row_sums > text_threshold)[0]
             
+            # Group consecutive text rows into bands
             text_bands = []
             if len(text_rows) > 0:
                 current_band = [text_rows[0]]
@@ -68,6 +71,7 @@ if legend_file:
                 if len(current_band) > 3:
                     text_bands.append((min(current_band), max(current_band)))
             
+            # 2. For EACH text band, find symbols to the LEFT
             symbols = []
             marked_img = legend_color.copy()
             draw = ImageDraw.Draw(marked_img)
@@ -79,8 +83,9 @@ if legend_file:
             
             sym_count = 0
             for y1, y2 in text_bands:
-                sy1 = max(0, y1 - 5)
-                sy2 = min(h, y2 + 5)
+                # Expand band significantly to catch symbols that might be taller than text
+                sy1 = max(0, y1 - 10)
+                sy2 = min(h, y2 + 10)
                 
                 band_slice = binary[sy1:sy2, :]
                 
@@ -89,10 +94,14 @@ if legend_file:
                 for i in range(1, num_labels):
                     x, y, bw, bh, area = stats[i]
                     
+                    # Skip if component is on the far right (where text lives)
                     if x > w * 0.55:  
                         continue
                     
-                    if area < 30 or bw < 8 or bh < 8:
+                    # ✅ FIX: Relaxed thresholds for small/thin electrical symbols
+                    # Area > 10 allows thin lines (e.g., 2px wide x 10px tall = 20px)
+                    # Height > 5 allows small circles
+                    if area < 10 or bw < 4 or bh < 5:
                         continue
                     
                     pad = 4
@@ -103,10 +112,21 @@ if legend_file:
                     
                     symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
                     
-                    target_h = 50
+                    # ✅ FIX: Better normalization for tiny symbols
+                    # Instead of forcing 50px height (which blurs tiny icons), 
+                    # we scale up by a factor if they are too small, or keep ratio.
+                    target_h = 60
                     scale = target_h / max(1, bh)
+                    
+                    # If symbol is very small (<20px), scale it up more aggressively
+                    if bh < 20:
+                        scale = max(scale, 3.0)
+                        
                     new_w = max(15, int(bw * scale))
-                    symbol_resized = cv2.resize(symbol_crop, (new_w, target_h), interpolation=cv2.INTER_AREA)
+                    new_h = int(bh * scale)
+                    
+                    # Use INTER_CUBIC for better upscaling of small icons
+                    symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                     
                     symbols.append({
                         'image': symbol_resized,
@@ -114,7 +134,7 @@ if legend_file:
                         'area': area
                     })
                     
-                    draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=3)
+                    draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
                     sym_count += 1
                     label = f"S{sym_count}"
                     bbox = draw.textbbox((cx1, cy1-20), label, font=font)
@@ -125,12 +145,12 @@ if legend_file:
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols (zero alphabets)")
+            st.success(f"✅ Found {len(symbols)} symbols")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Only items LEFT of text bands are extracted. Letters are ignored.")
+            st.caption("Only items LEFT of text bands are extracted.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
@@ -152,19 +172,21 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    # ✅ FIX: Resize manually, save to buffer, NO width param on st.image
+                    # ✅ FIX: Robust display using BytesIO buffer
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     
-                    # Scale up 3x so it displays clearly without st.image resizing
-                    new_size = (sym_pil.width * 3, sym_pil.height * 3)
-                    sym_pil = sym_pil.resize(new_size, Image.NEAREST)
+                    # Scale up for visibility in UI
+                    sym_pil = sym_pil.resize(
+                        (max(sym_pil.width * 2, 40), max(sym_pil.height * 2, 40)), 
+                        Image.NEAREST
+                    )
                     
                     buf = io.BytesIO()
                     sym_pil.save(buf, format='PNG')
                     buf.seek(0)
                     
-                    # ✅ KEY FIX: No width parameter — let Streamlit show at natural size
+                    # No width param to avoid internal resize crash
                     st.image(buf)
                     
                     st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
@@ -183,7 +205,7 @@ if st.session_state.get('all_symbols'):
             st.session_state.legend_confirmed = True
             st.success(f"✅ **{len(selected_indices)} receptacles confirmed!**")
         else:
-            st.warning("⚠️ Please select at least one symbol")
+            st.warning("️ Please select at least one symbol")
 
 # ===== STEP 4 & 5: COUNT IN POWER PLAN =====
 if st.session_state.legend_confirmed:
@@ -216,10 +238,11 @@ if st.session_state.legend_confirmed:
                 timg = tmpl['image']
                 th, tw = timg.shape
                 
-                for scale in [0.6, 0.8, 1.0, 1.2, 1.4]:
+                # Wider scale range for small symbols
+                for scale in [0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0]:
                     new_h = int(th * scale)
                     new_w = int(tw * scale)
-                    if new_h < 8 or new_w < 8 or new_h > h_p or new_w > w_p:
+                    if new_h < 5 or new_w < 5 or new_h > h_p or new_w > w_p:
                         continue
                     
                     tpil = Image.fromarray(timg.astype(np.uint8))
@@ -227,9 +250,9 @@ if st.session_state.legend_confirmed:
                     tscaled_bin = (tscaled < 128).astype(np.uint8)
                     
                     black_count = np.sum(tscaled_bin)
-                    if black_count < 5: continue
+                    if black_count < 3: continue
                     
-                    step = max(3, min(new_h, new_w) // 4)
+                    step = max(2, min(new_h, new_w) // 3)
                     for y in range(0, h_p - new_h + 1, step):
                         for x in range(0, w_p - new_w + 1, step):
                             patch = power_bin[y:y+new_h, x:x+new_w]
