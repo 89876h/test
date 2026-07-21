@@ -33,7 +33,7 @@ with st.sidebar:
     """)
 
 # ===== STEP 1 & 2: UPLOAD & EXTRACT =====
-st.header(" Step 1: Upload Legend Page")
+st.header("📄 Step 1: Upload Legend Page")
 legend_file = st.file_uploader("Upload legend image", type=['png', 'jpg', 'jpeg'], key='legend_upload')
 
 if legend_file:
@@ -159,10 +159,21 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    # ✅ FIX: Convert grayscale numpy array to RGB PIL Image before display
+                    # ✅ ROBUST FIX: Use BytesIO buffer to bypass internal resize errors
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
-                    st.image(sym_pil, width=80)
+                    
+                    # Scale up slightly for better visibility and stability
+                    sym_pil = sym_pil.resize(
+                        (max(sym_pil.width * 2, 20), max(sym_pil.height * 2, 20)), 
+                        Image.NEAREST
+                    )
+                    
+                    buf = io.BytesIO()
+                    sym_pil.save(buf, format='PNG')
+                    buf.seek(0)
+                    
+                    st.image(buf, width=80)
                     
                     st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
                     
@@ -195,7 +206,7 @@ if st.session_state.legend_confirmed:
         st.subheader("Power Plan")
         st.image(power_color, use_container_width=True)
         
-        if st.button(" Count Receptacles", type="primary", use_container_width=True):
+        if st.button("🔍 Count Receptacles", type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status = st.empty()
             
@@ -314,6 +325,6 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
