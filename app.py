@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Each vertically stacked symbol is treated as separate.")
+st.markdown("Structure-aware detection: Each stacked symbol is treated as a separate receptacle.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -26,8 +26,8 @@ with st.sidebar:
     st.markdown("### 📋 Process")
     st.markdown("""
     **Step 1:** Upload legend  
-    **Step 2:** Auto-extract symbols (left of text)  
-    **Step 3:** Select receptacles  
+    **Step 2:** Extract *each* symbol (left of text) — stacked symbols are separate  
+    **Step 3:** Select which are receptacles  
     **Step 4:** Upload power plan  
     **Step 5:** Count  
     """)
@@ -45,7 +45,7 @@ if legend_file:
         st.subheader("Original Legend")
         st.image(legend_color, use_container_width=True)
     
-    if st.button("🔍 Extract Symbols", type="primary", use_container_width=True):
+    if st.button("🔍 Extract Symbols (Left of Text)", type="primary", use_container_width=True):
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
@@ -57,7 +57,7 @@ if legend_file:
             text_threshold = np.mean(row_sums) * 0.3
             text_rows = np.where(row_sums > text_threshold)[0]
             
-            # Group consecutive text rows into bands (each band = one legend item)
+            # Group consecutive text rows into bands
             text_bands = []
             if len(text_rows) > 0:
                 current_band = [text_rows[0]]
@@ -71,8 +71,7 @@ if legend_file:
                 if len(current_band) > 3:
                     text_bands.append((min(current_band), max(current_band)))
             
-            # ✅ CRITICAL FIX: Process EACH TEXT BAND INDEPENDENTLY
-            # Each text band corresponds to one legend entry (one symbol + its label)
+            # 2. For EACH text band, find symbols to the LEFT — ONE BOX PER SYMBOL
             symbols = []
             marked_img = legend_color.copy()
             draw = ImageDraw.Draw(marked_img)
@@ -85,53 +84,51 @@ if legend_file:
             sym_count = 0
             
             for y1, y2 in text_bands:
-                # For this legend entry, look at the area to the LEFT of the text
-                # We'll search from left edge up to ~55% of width
-                sy1 = max(0, y1 - 10)
-                sy2 = min(h, y2 + 10)
+                # Expand band to catch symbols above/below text line
+                sy1 = max(0, y1 - 15)
+                sy2 = min(h, y2 + 15)
                 
-                # Extract only the left part of this band
-                band_slice = binary[sy1:sy2, :int(w * 0.55)]
+                band_slice = binary[sy1:sy2, :]
                 
-                # Find connected components ONLY in this left region
                 num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(band_slice, connectivity=8)
-                
-                # Find the LARGEST component in this band (the symbol)
-                best_comp = None
-                best_area = 0
                 
                 for i in range(1, num_labels):
                     x, y, bw, bh, area = stats[i]
                     
-                    # Skip very tiny noise
-                    if area < 10 or bw < 4:
+                    # Skip if on far right (text area)
+                    if x > w * 0.55:
                         continue
                     
-                    # Keep the largest component in this band
-                    if area > best_area:
-                        best_area = area
-                        best_comp = {
-                            'x': x, 'y': y, 'w': bw, 'h': bh,
-                            'area': area
-                        }
-                
-                # If we found a component, process it
-                if best_comp is not None:
-                    x, y, bw, bh = best_comp['x'], best_comp['y'], best_comp['w'], best_comp['h']
+                    # ✅ CRITICAL: Filter ONLY text-like labels, keep all geometric shapes
+                    # Text labels (e.g., "S2", "J") are usually:
+                    #   - Very narrow (width < 12) AND
+                    #   - Very short (height < 18) AND
+                    #   - Low fill ratio (< 0.4) OR high aspect ratio (> 3.0)
+                    fill_ratio = area / (bw * bh) if (bw * bh) > 0 else 0
+                    aspect_ratio = max(bw, bh) / min(bw, bh) if min(bw, bh) > 0 else 100
                     
-                    pad = 5
+                    is_text_label = (
+                        bw < 12 and 
+                        bh < 18 and 
+                        (fill_ratio < 0.4 or aspect_ratio > 3.0)
+                    )
+                    
+                    if is_text_label:
+                        continue  # Skip "S2", "J", etc.
+                    
+                    # Keep everything else: circles, squares, double-lines, etc.
+                    pad = 4
                     cx1 = max(0, x - pad)
                     cx2 = min(w, x + bw + pad)
-                    cy1 = max(0, y + sy1 - pad)  # Adjust y back to global coordinates
-                    cy2 = min(h, y + sy1 + bh + pad)
+                    cy1 = max(0, y - pad)
+                    cy2 = min(h, y + bh + pad)
                     
                     symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
                     
-                    # Normalize size
+                    # Normalize for template matching
                     target_h = 60
                     scale = target_h / max(1, bh)
-                    if bh < 20: scale = max(scale, 3.0)
-                    
+                    if bh < 20: scale = max(scale, 3.0)  # Upscale tiny symbols
                     new_w = max(15, int(bw * scale))
                     new_h = int(bh * scale)
                     symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
@@ -139,10 +136,10 @@ if legend_file:
                     symbols.append({
                         'image': symbol_resized,
                         'x': cx1, 'y': cy1, 'w': bw, 'h': bh,
-                        'area': best_area
+                        'area': area
                     })
                     
-                    # Draw on marked image
+                    # Draw tight green box around *this single symbol*
                     draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
                     sym_count += 1
                     label = f"S{sym_count}"
@@ -154,12 +151,12 @@ if legend_file:
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols (One per legend line)")
+            st.success(f"✅ Found {len(symbols)} symbols (Each stacked symbol is separate)")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Each green box is one symbol from a separate legend line.")
+            st.caption("Each green box = one symbol. Stacked symbols are NOT merged.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
@@ -185,7 +182,7 @@ if st.session_state.get('all_symbols'):
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     
-                    # Scale up
+                    # Scale up for visibility
                     sym_pil = sym_pil.resize(
                         (max(sym_pil.width * 2, 50), max(sym_pil.height * 2, 50)), 
                         Image.NEAREST
