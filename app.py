@@ -1,8 +1,11 @@
+Here is the full, corrected code. I have applied the fix to **Step 3** where the crash occurred, ensuring all grayscale numpy arrays are properly converted to RGB PIL images before being passed to `st.image()`.
+
+```python
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import io
-import cv2  # We need OpenCV for reliable connected components
+import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
@@ -15,19 +18,21 @@ if 'confirmed_templates' not in st.session_state:
     st.session_state.confirmed_templates = []
 if 'marked_legend' not in st.session_state:
     st.session_state.marked_legend = None
+if 'all_symbols' not in st.session_state:
+    st.session_state.all_symbols = []
 
 with st.sidebar:
     st.header("⚙️ Settings")
     match_threshold = st.slider("Match Sensitivity", 0.3, 0.95, 0.5, 0.05)
     
     st.markdown("---")
-    st.markdown("### 📋 Process")
+    st.markdown("###  Process")
     st.markdown("""
-    **Step 1:** Upload legend
-    **Step 2:** Auto-extract symbols (left of text)
-    **Step 3:** Select receptacles
-    **Step 4:** Upload power plan
-    **Step 5:** Count
+    **Step 1:** Upload legend  
+    **Step 2:** Auto-extract symbols (left of text)  
+    **Step 3:** Select receptacles  
+    **Step 4:** Upload power plan  
+    **Step 5:** Count  
     """)
 
 # ===== STEP 1 & 2: UPLOAD & EXTRACT =====
@@ -41,6 +46,7 @@ if legend_file:
     col1, col2 = st.columns([1, 1])
     with col1:
         st.subheader("Original Legend")
+        # ✅ FIX: Ensure PIL Image is passed
         st.image(legend_color, use_container_width=True)
     
     if st.button(" Extract Symbols (Left of Text)", type="primary", use_container_width=True):
@@ -48,7 +54,6 @@ if legend_file:
             h, w = legend_gray.shape
             
             # 1. Find TEXT regions using horizontal projection
-            # Text rows have consistent dark pixels across the width
             binary = (legend_gray < 128).astype(np.uint8)
             row_sums = np.sum(binary, axis=1)
             
@@ -61,10 +66,10 @@ if legend_file:
             if len(text_rows) > 0:
                 current_band = [text_rows[0]]
                 for r in text_rows[1:]:
-                    if r - current_band[-1] <= 5:  # Allow small gaps
+                    if r - current_band[-1] <= 5:
                         current_band.append(r)
                     else:
-                        if len(current_band) > 3:  # Minimum height for a text line
+                        if len(current_band) > 3:
                             text_bands.append((min(current_band), max(current_band)))
                         current_band = [r]
                 if len(current_band) > 3:
@@ -82,21 +87,17 @@ if legend_file:
             
             sym_count = 0
             for y1, y2 in text_bands:
-                # Expand band slightly to catch symbol baseline/cap height
                 sy1 = max(0, y1 - 5)
                 sy2 = min(h, y2 + 5)
                 
-                # Extract the full row slice for this band
                 band_slice = binary[sy1:sy2, :]
                 
-                # Find connected components in this band
                 num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(band_slice, connectivity=8)
                 
                 for i in range(1, num_labels):
                     x, y, bw, bh, area = stats[i]
                     
                     # Skip if component is on the far right (where text lives)
-                    # In most legends, text starts around 60-70% of width
                     if x > w * 0.55:  
                         continue
                     
@@ -104,7 +105,6 @@ if legend_file:
                     if area < 30 or bw < 8 or bh < 8:
                         continue
                     
-                    # This is a SYMBOL! It's in the same vertical band as text, but to the left.
                     pad = 4
                     cx1 = max(0, x - pad)
                     cx2 = min(w, x + bw + pad)
@@ -125,7 +125,6 @@ if legend_file:
                         'area': area
                     })
                     
-                    # Mark in GREEN on legend
                     draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=3)
                     sym_count += 1
                     label = f"S{sym_count}"
@@ -133,7 +132,6 @@ if legend_file:
                     draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
                     draw.text((cx1, cy1-20), label, fill='green', font=font)
             
-            # Store results
             st.session_state.marked_legend = marked_img
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
@@ -165,8 +163,11 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    sym_img = Image.fromarray(sym['image'].astype(np.uint8))
-                    st.image(sym_img, width=80)
+                    # ✅ FIX: Convert grayscale numpy array to RGB PIL Image
+                    sym_gray = sym['image'].astype(np.uint8)
+                    sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
+                    st.image(sym_pil, width=80)
+                    
                     st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
                     
                     is_selected = st.checkbox(
@@ -216,7 +217,6 @@ if st.session_state.legend_confirmed:
                 timg = tmpl['image']
                 th, tw = timg.shape
                 
-                # Multi-scale matching
                 for scale in [0.6, 0.8, 1.0, 1.2, 1.4]:
                     new_h = int(th * scale)
                     new_w = int(tw * scale)
@@ -230,7 +230,6 @@ if st.session_state.legend_confirmed:
                     black_count = np.sum(tscaled_bin)
                     if black_count < 5: continue
                     
-                    # Sliding window with step size
                     step = max(3, min(new_h, new_w) // 4)
                     for y in range(0, h_p - new_h + 1, step):
                         for x in range(0, w_p - new_w + 1, step):
@@ -247,7 +246,6 @@ if st.session_state.legend_confirmed:
             progress_bar.progress(85)
             status.text("Removing duplicates...")
             
-            # Non-maximum suppression
             if all_detections:
                 all_detections.sort(key=lambda d: d['conf'], reverse=True)
                 unified = []
@@ -320,6 +318,7 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
+```
