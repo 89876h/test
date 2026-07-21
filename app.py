@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Filters text & separates stacked symbols.")
+st.markdown("Structure-aware detection: Each vertically stacked symbol is treated as separate.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -45,7 +45,7 @@ if legend_file:
         st.subheader("Original Legend")
         st.image(legend_color, use_container_width=True)
     
-    if st.button("🔍 Extract Symbols (Left of Text)", type="primary", use_container_width=True):
+    if st.button("🔍 Extract Symbols", type="primary", use_container_width=True):
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
@@ -57,7 +57,7 @@ if legend_file:
             text_threshold = np.mean(row_sums) * 0.3
             text_rows = np.where(row_sums > text_threshold)[0]
             
-            # Group consecutive text rows into bands
+            # Group consecutive text rows into bands (each band = one legend item)
             text_bands = []
             if len(text_rows) > 0:
                 current_band = [text_rows[0]]
@@ -71,121 +71,9 @@ if legend_file:
                 if len(current_band) > 3:
                     text_bands.append((min(current_band), max(current_band)))
             
-            # 2. For EACH text band, find symbols to the LEFT
-            raw_components = []
-            
-            for y1, y2 in text_bands:
-                # Expand band significantly to catch symbols taller than text
-                sy1 = max(0, y1 - 20)
-                sy2 = min(h, y2 + 20)
-                
-                band_slice = binary[sy1:sy2, :]
-                
-                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(band_slice, connectivity=8)
-                
-                for i in range(1, num_labels):
-                    x, y, bw, bh, area = stats[i]
-                    
-                    # Skip text area (right side)
-                    if x > w * 0.55:  
-                        continue
-                    
-                    # Skip tiny noise
-                    if area < 5 or bw < 3 or bh < 3:
-                        continue
-                    
-                    # ✅ FIX: TEXT FILTER
-                    # Text characters usually have low "fill ratio" or are very thin
-                    fill_ratio = area / (bw * bh)
-                    
-                    # Heuristic: Text labels like "S2" are usually small (<15px wide) AND have low fill
-                    # Symbols like circles/squares are either larger or have higher fill
-                    if bw < 15 and bh < 20 and fill_ratio < 0.5:
-                        continue
-
-                    raw_components.append({
-                        'x': x, 'y': y, 'w': bw, 'h': bh, 
-                        'area': area, 'band_y1': sy1, 'band_y2': sy2
-                    })
-
-            # ✅ FIX: MERGE NEARBY COMPONENTS (Handles Nested Rectangles ONLY)
-            merged_symbols = []
-            used_indices = set()
-            
-            # Sort by X position
-            raw_components.sort(key=lambda c: c['x'])
-            
-            for i, comp in enumerate(raw_components):
-                if i in used_indices:
-                    continue
-                
-                group = [comp]
-                used_indices.add(i)
-                
-                for j, other in enumerate(raw_components):
-                    if j in used_indices:
-                        continue
-                    
-                    cx1, cy1, cw1, ch1 = comp['x'], comp['y'], comp['w'], comp['h']
-                    cx2, cy2, cw2, ch2 = other['x'], other['y'], other['w'], other['h']
-                    
-                    # Calculate centers
-                    center1_y = cy1 + ch1/2
-                    center2_y = cy2 + ch2/2
-                    
-                    # ✅ CRITICAL FIX: VERTICAL SEPARATION CHECK
-                    # Only merge if they are roughly at the SAME vertical level
-                    # If one is significantly above/below the other, DO NOT merge (they are stacked symbols)
-                    y_dist = abs(center1_y - center2_y)
-                    max_height = max(ch1, ch2)
-                    
-                    # If vertical distance is greater than 1.5x the height, they are separate stacked symbols
-                    if y_dist > max_height * 1.5:
-                        continue
-                        
-                    # Check horizontal proximity (for nested rectangles)
-                    x_dist = abs(cx1 - cx2)
-                    
-                    # If close horizontally AND vertically aligned, merge them
-                    if x_dist < (max(cw1, cw2) + 10):
-                         group.append(other)
-                         used_indices.add(j)
-                
-                # Create unified bounding box
-                min_x = min(c['x'] for c in group)
-                min_y = min(c['y'] for c in group)
-                max_x = max(c['x'] + c['w'] for c in group)
-                max_y = max(c['y'] + c['h'] for c in group)
-                
-                final_w = max_x - min_x
-                final_h = max_y - min_y
-                
-                # Add padding
-                pad = 5
-                cx1 = max(0, min_x - pad)
-                cx2 = min(w, max_x + pad)
-                cy1 = max(0, min_y - pad)
-                cy2 = min(h, max_y + pad)
-                
-                symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
-                
-                # Normalize size
-                target_h = 60
-                scale = target_h / max(1, final_h)
-                if final_h < 20: scale = max(scale, 3.0)
-                
-                new_w = max(15, int(final_w * scale))
-                new_h = int(final_h * scale)
-                symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                
-                merged_symbols.append({
-                    'image': symbol_resized,
-                    'x': cx1, 'y': cy1, 'w': final_w, 'h': final_h,
-                    'area': sum(c['area'] for c in group)
-                })
-
-            # Display Results
-            symbols = merged_symbols
+            # ✅ CRITICAL FIX: Process EACH TEXT BAND INDEPENDENTLY
+            # Each text band corresponds to one legend entry (one symbol + its label)
+            symbols = []
             marked_img = legend_color.copy()
             draw = ImageDraw.Draw(marked_img)
             
@@ -194,31 +82,89 @@ if legend_file:
             except:
                 font = ImageFont.load_default()
             
-            for idx, sym in enumerate(symbols):
-                cx1, cy1 = sym['x'], sym['y']
-                cx2, cy2 = cx1 + sym['w'], cy1 + sym['h']
+            sym_count = 0
+            
+            for y1, y2 in text_bands:
+                # For this legend entry, look at the area to the LEFT of the text
+                # We'll search from left edge up to ~55% of width
+                sy1 = max(0, y1 - 10)
+                sy2 = min(h, y2 + 10)
                 
-                draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
-                label = f"S{idx+1}"
-                bbox = draw.textbbox((cx1, cy1-20), label, font=font)
-                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
-                draw.text((cx1, cy1-20), label, fill='green', font=font)
+                # Extract only the left part of this band
+                band_slice = binary[sy1:sy2, :int(w * 0.55)]
+                
+                # Find connected components ONLY in this left region
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(band_slice, connectivity=8)
+                
+                # Find the LARGEST component in this band (the symbol)
+                best_comp = None
+                best_area = 0
+                
+                for i in range(1, num_labels):
+                    x, y, bw, bh, area = stats[i]
+                    
+                    # Skip very tiny noise
+                    if area < 10 or bw < 4:
+                        continue
+                    
+                    # Keep the largest component in this band
+                    if area > best_area:
+                        best_area = area
+                        best_comp = {
+                            'x': x, 'y': y, 'w': bw, 'h': bh,
+                            'area': area
+                        }
+                
+                # If we found a component, process it
+                if best_comp is not None:
+                    x, y, bw, bh = best_comp['x'], best_comp['y'], best_comp['w'], best_comp['h']
+                    
+                    pad = 5
+                    cx1 = max(0, x - pad)
+                    cx2 = min(w, x + bw + pad)
+                    cy1 = max(0, y + sy1 - pad)  # Adjust y back to global coordinates
+                    cy2 = min(h, y + sy1 + bh + pad)
+                    
+                    symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
+                    
+                    # Normalize size
+                    target_h = 60
+                    scale = target_h / max(1, bh)
+                    if bh < 20: scale = max(scale, 3.0)
+                    
+                    new_w = max(15, int(bw * scale))
+                    new_h = int(bh * scale)
+                    symbol_resized = cv2.resize(symbol_crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                    
+                    symbols.append({
+                        'image': symbol_resized,
+                        'x': cx1, 'y': cy1, 'w': bw, 'h': bh,
+                        'area': best_area
+                    })
+                    
+                    # Draw on marked image
+                    draw.rectangle([cx1-2, cy1-2, cx2+2, cy2+2], outline='lime', width=2)
+                    sym_count += 1
+                    label = f"S{sym_count}"
+                    bbox = draw.textbbox((cx1, cy1-20), label, font=font)
+                    draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
+                    draw.text((cx1, cy1-20), label, fill='green', font=font)
             
             st.session_state.marked_legend = marked_img
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols (Stacked symbols separated)")
+            st.success(f"✅ Found {len(symbols)} symbols (One per legend line)")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Nested shapes merged. Stacked shapes kept separate.")
+            st.caption("Each green box is one symbol from a separate legend line.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
     st.markdown("---")
-    st.header(" Step 3: Select Which Symbols Are Receptacles")
+    st.header("🔌 Step 3: Select Which Symbols Are Receptacles")
     
     symbols = st.session_state.all_symbols
     st.write(f"Found **{len(symbols)}** true symbols in legend")
@@ -239,7 +185,7 @@ if st.session_state.get('all_symbols'):
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     
-                    # Scale up for visibility
+                    # Scale up
                     sym_pil = sym_pil.resize(
                         (max(sym_pil.width * 2, 50), max(sym_pil.height * 2, 50)), 
                         Image.NEAREST
@@ -267,12 +213,12 @@ if st.session_state.get('all_symbols'):
             st.session_state.legend_confirmed = True
             st.success(f"✅ **{len(selected_indices)} receptacles confirmed!**")
         else:
-            st.warning("️ Please select at least one symbol")
+            st.warning("⚠️ Please select at least one symbol")
 
 # ===== STEP 4 & 5: COUNT IN POWER PLAN =====
 if st.session_state.legend_confirmed:
     st.markdown("---")
-    st.header(" Step 4: Upload Power Plan")
+    st.header("🔌 Step 4: Upload Power Plan")
     power_file = st.file_uploader("Upload power plan", type=['png', 'jpg', 'jpeg'], key='power_upload')
     
     if power_file:
@@ -391,7 +337,7 @@ if st.session_state.legend_confirmed:
                 st.markdown(f"""
                 <div style="background:#fff5f5; padding:30px; border-radius:15px; 
                             border:4px solid red; text-align:center; margin:20px 0;">
-                    <h2 style="color:#cc0000;"> RECEPTACLES FOUND</h2>
+                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
                     <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
                     <h3 style="color:#cc0000;">Total Count</h3>
                 </div>
@@ -401,6 +347,6 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
