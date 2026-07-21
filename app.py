@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Optimized for nested/complex symbols.")
+st.markdown("Structure-aware detection: Filters out text labels & merges nested shapes.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -45,7 +45,7 @@ if legend_file:
         st.subheader("Original Legend")
         st.image(legend_color, use_container_width=True)
     
-    if st.button("🔍 Extract Symbols (Left of Text)", type="primary", use_container_width=True):
+    if st.button(" Extract Symbols (Left of Text)", type="primary", use_container_width=True):
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
@@ -75,9 +75,9 @@ if legend_file:
             raw_components = []
             
             for y1, y2 in text_bands:
-                # Expand band significantly
-                sy1 = max(0, y1 - 15)
-                sy2 = min(h, y2 + 15)
+                # Expand band significantly to catch symbols taller than text
+                sy1 = max(0, y1 - 20)
+                sy2 = min(h, y2 + 20)
                 
                 band_slice = binary[sy1:sy2, :]
                 
@@ -94,52 +94,59 @@ if legend_file:
                     if area < 5 or bw < 3 or bh < 3:
                         continue
                     
-                    # Store raw component info
+                    # ✅ FIX: TEXT FILTER
+                    # Text characters usually have low "fill ratio" (lots of white space inside bounding box)
+                    # OR they are very thin (high aspect ratio). 
+                    # Symbols like circles/squares are "blockier".
+                    fill_ratio = area / (bw * bh)
+                    aspect_ratio = max(bw, bh) / min(bw, bh)
+                    
+                    # If it's very thin (like a letter 'I' or 'l') or very empty (like 'O' or '0' text), skip it
+                    # BUT we must be careful not to skip thin symbol lines. 
+                    # Heuristic: Text is usually < 15px wide. Symbols are often wider or have higher fill.
+                    # A better heuristic for legends: Text is usually isolated. Symbols might be complex.
+                    # Let's use a simple rule: If width < 12 AND height < 20, it's likely a label like "S2".
+                    if bw < 12 and bh < 20 and fill_ratio < 0.6:
+                        continue
+
                     raw_components.append({
                         'x': x, 'y': y, 'w': bw, 'h': bh, 
                         'area': area, 'band_y1': sy1, 'band_y2': sy2
                     })
 
             # ✅ FIX: MERGE NEARBY COMPONENTS (Handles Nested Rectangles)
-            # If two components overlap or are very close, merge them into one bounding box
             merged_symbols = []
             used_indices = set()
             
-            # Sort by X position to process left-to-right
+            # Sort by X position
             raw_components.sort(key=lambda c: c['x'])
             
             for i, comp in enumerate(raw_components):
                 if i in used_indices:
                     continue
                 
-                # Start a new group with current component
                 group = [comp]
                 used_indices.add(i)
                 
-                # Check against all other unused components
                 for j, other in enumerate(raw_components):
                     if j in used_indices:
                         continue
                     
-                    # Calculate distance between components
-                    # We check if they are roughly in same vertical area and close horizontally
                     cx1, cy1, cw1, ch1 = comp['x'], comp['y'], comp['w'], comp['h']
                     cx2, cy2, cw2, ch2 = other['x'], other['y'], other['w'], other['h']
                     
-                    # Check for overlap or close proximity (gap < 10px)
+                    # Check proximity
                     x_dist = abs(cx1 - cx2)
                     y_dist = abs(cy1 - cy2)
                     
-                    # If they are close enough to be part of same symbol
-                    if x_dist < (max(cw1, cw2) + 10) and y_dist < (max(ch1, ch2) + 10):
-                         # Also check if one is inside the other (nested rectangles)
-                         # Or if they share significant vertical space
+                    # If close enough to be part of same symbol
+                    if x_dist < (max(cw1, cw2) + 8) and y_dist < (max(ch1, ch2) + 8):
                          y_overlap = min(cy1+ch1, cy2+ch2) - max(cy1, cy2)
-                         if y_overlap > 0 or y_dist < 5:
+                         if y_overlap > -5: # Allow slight vertical misalignment
                              group.append(other)
                              used_indices.add(j)
                 
-                # Create a unified bounding box for the group
+                # Create unified bounding box
                 min_x = min(c['x'] for c in group)
                 min_y = min(c['y'] for c in group)
                 max_x = max(c['x'] + c['w'] for c in group)
@@ -155,13 +162,12 @@ if legend_file:
                 cy1 = max(0, min_y - pad)
                 cy2 = min(h, max_y + pad)
                 
-                # Crop from original gray image
                 symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
                 
                 # Normalize size
                 target_h = 60
                 scale = target_h / max(1, final_h)
-                if final_h < 20: scale = max(scale, 3.0) # Upscale tiny symbols
+                if final_h < 20: scale = max(scale, 3.0)
                 
                 new_w = max(15, int(final_w * scale))
                 new_h = int(final_h * scale)
@@ -197,12 +203,12 @@ if legend_file:
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols (Nested shapes merged)")
+            st.success(f"✅ Found {len(symbols)} symbols (Text labels filtered out)")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Nested rectangles are now grouped as one symbol.")
+            st.caption("Text labels like 'S2' are ignored. Nested shapes are merged.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
