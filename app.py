@@ -1,6 +1,3 @@
-Here is the full, corrected code. I have applied the fix to **Step 3** where the crash occurred, ensuring all grayscale numpy arrays are properly converted to RGB PIL images before being passed to `st.image()`.
-
-```python
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -26,7 +23,7 @@ with st.sidebar:
     match_threshold = st.slider("Match Sensitivity", 0.3, 0.95, 0.5, 0.05)
     
     st.markdown("---")
-    st.markdown("###  Process")
+    st.markdown("### 📋 Process")
     st.markdown("""
     **Step 1:** Upload legend  
     **Step 2:** Auto-extract symbols (left of text)  
@@ -36,7 +33,7 @@ with st.sidebar:
     """)
 
 # ===== STEP 1 & 2: UPLOAD & EXTRACT =====
-st.header("📄 Step 1: Upload Legend Page")
+st.header(" Step 1: Upload Legend Page")
 legend_file = st.file_uploader("Upload legend image", type=['png', 'jpg', 'jpeg'], key='legend_upload')
 
 if legend_file:
@@ -46,10 +43,9 @@ if legend_file:
     col1, col2 = st.columns([1, 1])
     with col1:
         st.subheader("Original Legend")
-        # ✅ FIX: Ensure PIL Image is passed
         st.image(legend_color, use_container_width=True)
     
-    if st.button(" Extract Symbols (Left of Text)", type="primary", use_container_width=True):
+    if st.button("🔍 Extract Symbols (Left of Text)", type="primary", use_container_width=True):
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
@@ -163,7 +159,7 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    # ✅ FIX: Convert grayscale numpy array to RGB PIL Image
+                    # ✅ FIX: Convert grayscale numpy array to RGB PIL Image before display
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     st.image(sym_pil, width=80)
@@ -199,7 +195,7 @@ if st.session_state.legend_confirmed:
         st.subheader("Power Plan")
         st.image(power_color, use_container_width=True)
         
-        if st.button("🔍 Count Receptacles", type="primary", use_container_width=True):
+        if st.button(" Count Receptacles", type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status = st.empty()
             
@@ -308,7 +304,7 @@ if st.session_state.legend_confirmed:
                 st.markdown(f"""
                 <div style="background:#fff5f5; padding:30px; border-radius:15px; 
                             border:4px solid red; text-align:center; margin:20px 0;">
-                    <h2 style="color:#cc0000;"> RECEPTACLES FOUND</h2>
+                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
                     <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
                     <h3 style="color:#cc0000;">Total Count</h3>
                 </div>
@@ -318,7 +314,6 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
-```
