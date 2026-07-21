@@ -3,734 +3,574 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import numpy as np
 import io
 from datetime import datetime
-import math
 
 # Page setup
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 
 st.title("🔌 Electrical Receptacle Counter")
-st.write("Detects and counts electrical receptacle symbols in architectural drawings")
+st.markdown("Detect and count electrical receptacles in architectural drawings")
 
-# Sidebar settings
+# Initialize session state
+if 'legend_confirmed' not in st.session_state:
+    st.session_state.legend_confirmed = False
+if 'confirmed_templates' not in st.session_state:
+    st.session_state.confirmed_templates = []
+if 'marked_legend' not in st.session_state:
+    st.session_state.marked_legend = None
+
+# Sidebar
 with st.sidebar:
-    st.header("⚙️ Detection Settings")
+    st.header("⚙️ Settings")
     
     match_threshold = st.slider(
-        "Match Sensitivity", 
+        "Match Sensitivity",
         0.3, 0.95, 0.5, 0.05,
-        help="Lower = find more (may include false positives). Higher = stricter matching"
-    )
-    
-    min_symbol_size = st.slider(
-        "Minimum Symbol Size (pixels²)",
-        30, 500, 80, 10,
-        help="Smallest area to consider as a symbol"
-    )
-    
-    max_symbol_size = st.slider(
-        "Maximum Symbol Size (pixels²)",
-        500, 8000, 4000, 100,
-        help="Largest area to consider as a symbol"
+        help="Lower = find more matches"
     )
     
     st.markdown("---")
-    st.markdown("### 📋 How It Works")
+    st.markdown("### 📋 Process")
     st.markdown("""
-    1. Finds symbols near text in legend
-    2. Filters out letters and text
-    3. Identifies receptacle features (wires, connections)
-    4. Searches power plan for matches
-    5. Unifies overlapping detections
-    """)
-    
-    st.markdown("---")
-    st.markdown("### 💡 Tips")
-    st.markdown("""
-    - Receptacles often have lines/wires passing through
-    - Letters are automatically filtered out
-    - Lower sensitivity if missing symbols
-    - Higher sensitivity if getting false matches
+    **Step 1:** Upload legend page
+    **Step 2:** See symbols found in legend
+    **Step 3:** Select which are receptacles
+    **Step 4:** Upload power plan
+    **Step 5:** Count receptacles
     """)
 
-# Upload section
-col1, col2 = st.columns(2)
+# ===== STEP 1: UPLOAD LEGEND =====
+st.markdown("---")
+st.header("📄 Step 1: Upload Legend Page")
+st.caption("This page shows electrical symbols and their descriptions")
 
-with col1:
-    st.subheader("📄 Step 1: Upload Legend Page")
-    st.caption("Page showing receptacle symbol definitions")
-    legend_file = st.file_uploader("Legend image", type=['png','jpg','jpeg','tiff','bmp'])
-    if legend_file:
-        st.image(legend_file, use_container_width=True)
+legend_file = st.file_uploader(
+    "Upload legend image",
+    type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+    key='legend_upload'
+)
 
-with col2:
-    st.subheader("🔌 Step 2: Upload Power Plan")
-    st.caption("Page where receptacles will be counted")
-    power_file = st.file_uploader("Power plan image", type=['png','jpg','jpeg','tiff','bmp'])
-    if power_file:
-        st.image(power_file, use_container_width=True)
-
-# Processing
-if legend_file and power_file:
-    st.markdown("---")
+if legend_file:
+    # Load legend
+    legend_color = Image.open(legend_file).convert('RGB')
+    legend_gray = legend_color.convert('L')
     
-    if st.button("🔍 Count Receptacles", type="primary", use_container_width=True):
+    # Show original
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.subheader("Original Legend")
+        st.image(legend_color, use_container_width=True)
+    
+    # ===== STEP 2: FIND ALL SYMBOLS IN LEGEND =====
+    if st.button("🔍 Find Symbols in Legend", type="primary", use_container_width=True):
         
-        # Progress tracking
-        progress_bar = st.progress(0)
-        progress_text = st.empty()
-        detail_text = st.empty()
-        step_status = st.empty()
-        
-        # ===== STEP 1: Load & Preprocess (0-15%) =====
-        progress_text.markdown("**📥 Step 1/8: Loading and preprocessing images...**")
-        
-        for p in range(0, 15, 3):
-            progress_bar.progress(p)
-            detail_text.text(f"Loading... {p}%")
-        
-        legend_gray = Image.open(legend_file).convert('L')
-        power_gray = Image.open(power_file).convert('L')
-        power_color = Image.open(power_file).convert('RGB')
-        
-        progress_bar.progress(15)
-        detail_text.text("✅ Images loaded")
-        step_status.success("Step 1 complete: Images loaded")
-        
-        # ===== STEP 2: Enhance & Binarize (15-25%) =====
-        progress_text.markdown("**🔧 Step 2/8: Enhancing image quality...**")
-        
-        progress_bar.progress(17)
-        detail_text.text("Sharpening...")
-        legend_gray = legend_gray.filter(ImageFilter.SHARPEN)
-        power_gray = power_gray.filter(ImageFilter.SHARPEN)
-        
-        progress_bar.progress(20)
-        detail_text.text("Converting to binary...")
-        
-        # Adaptive-like thresholding
-        legend_arr = np.array(legend_gray)
-        power_arr = np.array(power_gray)
-        
-        # Use local mean for better thresholding
-        def adaptive_threshold(img_arr, window_size=15):
-            from scipy import ndimage
-            # Use simple mean filter
-            mean = ndimage.uniform_filter(img_arr.astype(float), size=window_size)
-            binary = (img_arr < mean - 5).astype(np.uint8)
-            return binary
-        
-        try:
-            legend_bin = adaptive_threshold(legend_arr)
-            power_bin = adaptive_threshold(power_arr)
-        except:
-            # Fallback to simple threshold
+        with st.spinner("Analyzing legend... Finding all symbols..."):
+            
+            progress_bar = st.progress(0)
+            status = st.empty()
+            
+            # Preprocess
+            status.text("Enhancing image...")
+            progress_bar.progress(10)
+            
+            legend_gray = legend_gray.filter(ImageFilter.SHARPEN)
+            legend_arr = np.array(legend_gray)
+            
+            # Binary threshold
+            status.text("Converting to binary...")
+            progress_bar.progress(20)
+            
             legend_bin = (legend_arr < 128).astype(np.uint8)
-            power_bin = (power_arr < 128).astype(np.uint8)
-        
-        h_legend, w_legend = legend_bin.shape
-        h_power, w_power = power_bin.shape
-        
-        progress_bar.progress(25)
-        detail_text.text(f"Legend: {w_legend}×{h_legend} | Power Plan: {w_power}×{h_power}")
-        step_status.success("Step 2 complete: Images enhanced")
-        
-        # ===== STEP 3: Find Text Regions (25-35%) =====
-        progress_text.markdown("**📝 Step 3/8: Identifying text regions in legend...**")
-        
-        progress_bar.progress(27)
-        detail_text.text("Analyzing row density...")
-        
-        # Find rows with text (consistent black pixel patterns)
-        row_black_ratio = np.sum(legend_bin == 1, axis=1) / w_legend
-        
-        # Text rows have moderate black pixel density (5-50%)
-        text_mask = (row_black_ratio > 0.03) & (row_black_ratio < 0.5)
-        text_rows = np.where(text_mask)[0]
-        
-        progress_bar.progress(30)
-        detail_text.text(f"Found {len(text_rows)} text rows")
-        
-        # Group into bands
-        text_bands = []
-        if len(text_rows) > 0:
-            current = [text_rows[0]]
-            for r in text_rows[1:]:
-                if r - current[-1] <= 4:
-                    current.append(r)
-                else:
-                    if len(current) > 10:
-                        text_bands.append((min(current), max(current)))
-                    current = [r]
-            if len(current) > 10:
-                text_bands.append((min(current), max(current)))
-        
-        progress_bar.progress(33)
-        detail_text.text(f"Found {len(text_bands)} text bands")
-        
-        # ===== STEP 4: Find Letters to Filter Out (33-40%) =====
-        progress_text.markdown("**🔤 Step 4/8: Identifying letters to exclude...**")
-        
-        progress_bar.progress(35)
-        detail_text.text("Finding text characters...")
-        
-        # Find all small components that are likely letters
-        letter_positions = []
-        
-        for band_y1, band_y2 in text_bands:
-            band = legend_bin[band_y1:band_y2+1, :]
             
-            # Look at middle-right portion (where text usually is)
-            text_region = band[:, int(w_legend*0.4):]
+            h, w = legend_bin.shape
             
-            # Find connected components
-            visited = np.zeros_like(text_region, dtype=bool)
+            # Find text rows
+            status.text("Finding text regions...")
+            progress_bar.progress(30)
             
-            for y in range(text_region.shape[0]):
-                for x in range(text_region.shape[1]):
-                    if text_region[y,x] == 1 and not visited[y,x]:
-                        # Flood fill
-                        stack = [(y,x)]
-                        pixels = []
-                        min_x, min_y = x, y
-                        max_x, max_y = x, y
-                        
-                        while stack:
-                            cy, cx = stack.pop()
-                            if (0 <= cy < text_region.shape[0] and 
-                                0 <= cx < text_region.shape[1] and 
-                                text_region[cy,cx] == 1 and 
-                                not visited[cy,cx]):
-                                
-                                visited[cy,cx] = True
-                                pixels.append((cy,cx))
-                                min_x = min(min_x, cx)
-                                min_y = min(min_y, cy)
-                                max_x = max(max_x, cx)
-                                max_y = max(max_y, cy)
-                                
-                                for ny, nx in [(cy-1,cx),(cy+1,cx),(cy,cx-1),(cy,cx+1),
-                                              (cy-1,cx-1),(cy-1,cx+1),(cy+1,cx-1),(cy+1,cx+1)]:
-                                    stack.append((ny,nx))
-                        
-                        w_char = max_x - min_x + 1
-                        h_char = max_y - min_y + 1
-                        aspect = w_char / h_char if h_char > 0 else 0
-                        
-                        # Letters are typically small and have certain aspect ratios
-                        if (10 < w_char < 80 and 10 < h_char < 80 and 
-                            0.2 < aspect < 2.0 and len(pixels) < 2000):
+            row_density = np.sum(legend_bin, axis=1) / w
+            text_rows = np.where((row_density > 0.02) & (row_density < 0.6))[0]
+            
+            # Group into bands
+            text_bands = []
+            if len(text_rows) > 0:
+                current = [text_rows[0]]
+                for r in text_rows[1:]:
+                    if r - current[-1] <= 4:
+                        current.append(r)
+                    else:
+                        if len(current) > 8:
+                            text_bands.append((min(current), max(current)))
+                        current = [r]
+                if len(current) > 8:
+                    text_bands.append((min(current), max(current)))
+            
+            # Find ALL components
+            status.text("Finding all symbols and letters...")
+            progress_bar.progress(50)
+            
+            all_components = []
+            
+            for band_idx, (by1, by2) in enumerate(text_bands):
+                band = legend_bin[by1:by2+1, :]
+                
+                # Process entire band width
+                visited = np.zeros_like(band, dtype=bool)
+                
+                for y in range(band.shape[0]):
+                    for x in range(band.shape[1]):
+                        if band[y, x] == 1 and not visited[y, x]:
+                            # Flood fill
+                            stack = [(y, x)]
+                            pixels = []
+                            min_x, min_y = x, y
+                            max_x, max_y = x, y
                             
-                            # Calculate character features
-                            density = len(pixels) / (w_char * h_char)
+                            while stack:
+                                cy, cx = stack.pop()
+                                if (0 <= cy < band.shape[0] and 
+                                    0 <= cx < band.shape[1] and 
+                                    band[cy, cx] == 1 and 
+                                    not visited[cy, cx]):
+                                    
+                                    visited[cy, cx] = True
+                                    pixels.append((cy, cx))
+                                    min_x = min(min_x, cx)
+                                    min_y = min(min_y, cy)
+                                    max_x = max(max_x, cx)
+                                    max_y = max(max_y, cy)
+                                    
+                                    for ny, nx in [(cy-1,cx),(cy+1,cx),(cy,cx-1),(cy,cx+1),
+                                                  (cy-1,cx-1),(cy-1,cx+1),(cy+1,cx-1),(cy+1,cx+1)]:
+                                        stack.append((ny, nx))
                             
-                            # Letters typically have 20-60% fill ratio
-                            if 0.15 < density < 0.65:
-                                letter_positions.append({
-                                    'x': int(w_legend*0.4) + min_x,
-                                    'y': band_y1 + min_y,
-                                    'w': w_char,
-                                    'h': h_char,
-                                    'area': len(pixels),
-                                    'density': density
+                            comp_w = max_x - min_x + 1
+                            comp_h = max_y - min_y + 1
+                            comp_area = len(pixels)
+                            
+                            # Filter size (20-4000 pixels)
+                            if 20 < comp_area < 4000 and 8 < comp_w < 200 and 8 < comp_h < 200:
+                                
+                                # Extract component
+                                pad = 3
+                                cy1 = max(0, min_y - pad)
+                                cy2 = min(band.shape[0], max_y + pad + 1)
+                                cx1 = max(0, min_x - pad)
+                                cx2 = min(band.shape[1], max_x + pad + 1)
+                                
+                                comp_img = band[cy1:cy2, cx1:cx2]
+                                
+                                # Calculate features
+                                density = comp_area / (comp_w * comp_h) if comp_w * comp_h > 0 else 0
+                                aspect = comp_w / comp_h if comp_h > 0 else 0
+                                
+                                # Check for horizontal lines
+                                h_lines = 0
+                                for row in range(comp_img.shape[0]):
+                                    if np.sum(comp_img[row, :]) > comp_img.shape[1] * 0.3:
+                                        h_lines += 1
+                                
+                                # Check for vertical lines
+                                v_lines = 0
+                                for col in range(comp_img.shape[1]):
+                                    if np.sum(comp_img[:, col]) > comp_img.shape[0] * 0.3:
+                                        v_lines += 1
+                                
+                                # Check if it's likely a letter (small, dense, tall)
+                                is_likely_letter = False
+                                
+                                # Letters are typically:
+                                # - Small area (50-800 pixels)
+                                # - High density (30-70%)
+                                # - Tall aspect ratio (0.3-1.5)
+                                # - Few horizontal lines
+                                
+                                if (50 < comp_area < 1000 and 
+                                    0.2 < density < 0.7 and 
+                                    0.2 < aspect < 2.0 and 
+                                    h_lines < 3):
+                                    is_likely_letter = True
+                                
+                                # Symbols are typically:
+                                # - Larger area (200-4000 pixels)
+                                # - Lower density (10-40%)
+                                # - More square (0.5-2.0)
+                                # - Have horizontal/vertical lines
+                                
+                                is_likely_symbol = False
+                                
+                                if (comp_area > 150 and 
+                                    density < 0.5 and 
+                                    0.4 < aspect < 2.5 and 
+                                    (h_lines >= 1 or v_lines >= 1)):
+                                    is_likely_symbol = True
+                                
+                                global_x = cx1
+                                global_y = by1 + cy1
+                                
+                                all_components.append({
+                                    'image': comp_img,
+                                    'x': global_x,
+                                    'y': global_y,
+                                    'w': comp_w,
+                                    'h': comp_h,
+                                    'area': comp_area,
+                                    'density': density,
+                                    'aspect': aspect,
+                                    'h_lines': h_lines,
+                                    'v_lines': v_lines,
+                                    'is_letter': is_likely_letter,
+                                    'is_symbol': is_likely_symbol,
+                                    'band': band_idx
                                 })
-        
-        progress_bar.progress(40)
-        detail_text.text(f"Identified {len(letter_positions)} letter characters to exclude")
-        step_status.success("Step 4 complete: Letters identified")
-        
-        # ===== STEP 5: Extract Symbols (40-55%) =====
-        progress_text.markdown("**🔌 Step 5/8: Extracting receptacle symbols from legend...**")
-        
-        templates = []
-        
-        for band_idx, (band_y1, band_y2) in enumerate(text_bands):
-            progress = 40 + int((band_idx / max(1, len(text_bands))) * 10)
-            progress_bar.progress(progress)
-            detail_text.text(f"Processing band {band_idx+1}/{len(text_bands)}...")
             
-            band = legend_bin[band_y1:band_y2+1, :]
+            progress_bar.progress(80)
+            status.text(f"Found {len(all_components)} components")
             
-            # Look at LEFT side for symbols
-            left_width = int(w_legend * 0.35)
-            left_band = band[:, :left_width]
-            
-            # Find components
-            visited = np.zeros_like(left_band, dtype=bool)
-            
-            for y in range(left_band.shape[0]):
-                for x in range(left_band.shape[1]):
-                    if left_band[y,x] == 1 and not visited[y,x]:
-                        # Flood fill
-                        stack = [(y,x)]
-                        pixels = []
-                        min_x, min_y = x, y
-                        max_x, max_y = x, y
-                        
-                        while stack:
-                            cy, cx = stack.pop()
-                            if (0 <= cy < left_band.shape[0] and 
-                                0 <= cx < left_band.shape[1] and 
-                                left_band[cy,cx] == 1 and 
-                                not visited[cy,cx]):
-                                
-                                visited[cy,cx] = True
-                                pixels.append((cy,cx))
-                                min_x = min(min_x, cx)
-                                min_y = min(min_y, cy)
-                                max_x = max(max_x, cx)
-                                max_y = max(max_y, cy)
-                                
-                                for ny, nx in [(cy-1,cx),(cy+1,cx),(cy,cx-1),(cy,cx+1),
-                                              (cy-1,cx-1),(cy-1,cx+1),(cy+1,cx-1),(cy+1,cx+1)]:
-                                    stack.append((ny,nx))
-                        
-                        comp_w = max_x - min_x + 1
-                        comp_h = max_y - min_y + 1
-                        comp_area = len(pixels)
-                        
-                        # Check if it could be a symbol (not a letter)
-                        if min_symbol_size < comp_area < max_symbol_size:
-                            aspect = comp_w / comp_h if comp_h > 0 else 0
-                            
-                            # Receptacles tend to be more square than letters
-                            if 0.4 < aspect < 2.5:
-                                
-                                # Check if this component overlaps with letter positions
-                                comp_x = min_x
-                                comp_y = band_y1 + min_y
-                                
-                                is_letter = False
-                                for letter in letter_positions:
-                                    # Check overlap
-                                    if (abs(comp_x - letter['x']) < 20 and 
-                                        abs(comp_y - letter['y']) < 20):
-                                        is_letter = True
-                                        break
-                                
-                                if not is_letter:
-                                    # Extract with padding
-                                    pad = 4
-                                    ty1 = max(0, min_y - pad)
-                                    ty2 = min(left_band.shape[0], max_y + pad + 1)
-                                    tx1 = max(0, min_x - pad)
-                                    tx2 = min(left_band.shape[1], max_x + pad + 1)
-                                    
-                                    template_img = left_band[ty1:ty2, tx1:tx2]
-                                    
-                                    if template_img.shape[0] > 8 and template_img.shape[1] > 8:
-                                        # Calculate features to identify receptacles
-                                        th, tw = template_img.shape
-                                        
-                                        # Check for horizontal lines (wires/connections)
-                                        h_lines = 0
-                                        for row in range(th):
-                                            row_sum = np.sum(template_img[row, :])
-                                            if row_sum > tw * 0.3:  # Line spanning >30% of width
-                                                h_lines += 1
-                                        
-                                        # Check for vertical lines
-                                        v_lines = 0
-                                        for col in range(tw):
-                                            col_sum = np.sum(template_img[:, col])
-                                            if col_sum > th * 0.3:
-                                                v_lines += 1
-                                        
-                                        # Check for circular features
-                                        center_y, center_x = th//2, tw//2
-                                        circle_score = 0
-                                        if th > 4 and tw > 4:
-                                            for angle in range(0, 360, 30):
-                                                rad = math.radians(angle)
-                                                r = min(th, tw) // 3
-                                                cy = int(center_y + r * math.sin(rad))
-                                                cx = int(center_x + r * math.cos(rad))
-                                                if 0 <= cy < th and 0 <= cx < tw:
-                                                    if template_img[cy, cx] == 1:
-                                                        circle_score += 1
-                                        
-                                        templates.append({
-                                            'image': template_img,
-                                            'w': comp_w,
-                                            'h': comp_h,
-                                            'area': comp_area,
-                                            'aspect': aspect,
-                                            'h_lines': h_lines,
-                                            'v_lines': v_lines,
-                                            'circle_score': circle_score,
-                                            'band': band_idx,
-                                            'position': (comp_x, comp_y)
-                                        })
-        
-        progress_bar.progress(55)
-        detail_text.text(f"✅ Extracted {len(templates)} potential symbols (letters excluded)")
-        step_status.success(f"Step 5 complete: {len(templates)} symbols found")
-        
-        # Show extracted templates
-        if templates:
-            st.markdown("#### 📋 Extracted Symbols from Legend:")
-            cols = st.columns(min(6, len(templates)))
-            for i, t in enumerate(templates[:12]):
-                with cols[i % 6]:
-                    timg = Image.fromarray(t['image'].astype(np.uint8) * 255)
-                    st.image(timg, caption=f"#{i+1} ({t['w']}×{t['h']})", use_container_width=True)
-        
-        # ===== STEP 6: Prioritize Receptacle-Like Templates (55-60%) =====
-        progress_text.markdown("**🎯 Step 6/8: Identifying best receptacle candidates...**")
-        
-        progress_bar.progress(57)
-        detail_text.text("Scoring templates by receptacle features...")
-        
-        # Score each template for "receptacle-ness"
-        for t in templates:
-            # Receptacles often have:
-            # - Horizontal lines (wires passing through)
-            # - Vertical lines (connection points)
-            # - Circular elements (outlet shape)
-            # - Moderate aspect ratio
-            
-            score = 0
-            
-            # Horizontal lines are very common in receptacles
-            if t['h_lines'] >= 1:
-                score += 3
-            if t['h_lines'] >= 2:
-                score += 2
-            
-            # Vertical lines suggest connections
-            if t['v_lines'] >= 1:
-                score += 2
-            
-            # Circle features suggest outlet shape
-            if t['circle_score'] >= 6:
-                score += 2
-            if t['circle_score'] >= 9:
-                score += 1
-            
-            # Good aspect ratio
-            if 0.6 < t['aspect'] < 1.7:
-                score += 1
-            
-            # Penalize if too letter-like (high density)
-            density = t['area'] / (t['w'] * t['h']) if t['w'] * t['h'] > 0 else 0
-            if density > 0.7:  # Very dense = probably letter
-                score -= 2
-            if density < 0.15:  # Very sparse = probably not symbol
-                score -= 1
-            
-            t['receptacle_score'] = score
-        
-        # Sort by receptacle score
-        templates.sort(key=lambda t: t['receptacle_score'], reverse=True)
-        
-        # Filter out low-scoring templates
-        good_templates = [t for t in templates if t['receptacle_score'] >= 2]
-        
-        if not good_templates:
-            good_templates = templates[:5]  # Fallback to top 5
-        
-        progress_bar.progress(60)
-        detail_text.text(f"Selected {len(good_templates)} best receptacle candidates")
-        step_status.success(f"Step 6 complete: {len(good_templates)} templates selected")
-        
-        # ===== STEP 7: Search Power Plan (60-85%) =====
-        progress_text.markdown("**🔍 Step 7/8: Searching power plan for receptacles...**")
-        
-        step_size = max(2, min(h_power, w_power) // 100)
-        all_detections = []
-        
-        for tidx, template in enumerate(good_templates[:8]):
-            progress = 60 + int((tidx / max(1, len(good_templates[:8]))) * 20)
-            progress_bar.progress(progress)
-            detail_text.text(f"Searching template {tidx+1}/{min(8, len(good_templates))}... Found {len(all_detections)} matches")
-            
-            timg = template['image']
-            th, tw = timg.shape
-            
-            scales = [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]
-            
-            for scale in scales:
-                new_h = int(th * scale)
-                new_w = int(tw * scale)
-                
-                if new_h < 6 or new_w < 6:
-                    continue
-                if new_h > h_power or new_w > w_power:
-                    continue
-                
-                # Resize template
-                tpil = Image.fromarray(timg.astype(np.uint8) * 255)
-                tscaled = np.array(tpil.resize((new_w, new_h), Image.Resampling.LANCZOS)) > 128
-                tscaled = tscaled.astype(np.uint8)
-                
-                # Count black pixels in template
-                template_black = np.sum(tscaled == 1)
-                if template_black < 5:
-                    continue
-                
-                # Sliding window
-                for y in range(0, h_power - new_h + 1, step_size):
-                    for x in range(0, w_power - new_w + 1, step_size):
-                        patch = power_bin[y:y+new_h, x:x+new_w]
-                        
-                        if patch.shape != tscaled.shape:
-                            continue
-                        
-                        # Match black pixels only
-                        black_mask = (tscaled == 1)
-                        patch_black = np.sum(patch[black_mask] == 1)
-                        
-                        match_ratio = patch_black / template_black
-                        
-                        if match_ratio >= match_threshold:
-                            all_detections.append({
-                                'x': int(x),
-                                'y': int(y),
-                                'w': new_w,
-                                'h': new_h,
-                                'conf': float(match_ratio),
-                                'template_id': tidx,
-                                'template_score': template['receptacle_score']
-                            })
-        
-        progress_bar.progress(82)
-        detail_text.text(f"Raw matches found: {len(all_detections)}")
-        
-        # ===== STEP 8: Unify & Remove Duplicates (82-100%) =====
-        progress_text.markdown("**🎯 Step 8/8: Unifying detections and removing duplicates...**")
-        
-        progress_bar.progress(85)
-        detail_text.text("Clustering nearby detections...")
-        
-        if all_detections:
-            # Sort by confidence * template_score
-            all_detections.sort(key=lambda d: d['conf'] * (1 + d['template_score'] * 0.1), reverse=True)
-            
-            # Cluster overlapping detections
-            clusters = []
-            used = set()
-            
-            for i, d in enumerate(all_detections):
-                if i in used:
-                    continue
-                
-                cluster = [d]
-                used.add(i)
-                
-                # Find all detections overlapping with this one
-                for j, d2 in enumerate(all_detections):
-                    if j in used:
-                        continue
-                    
-                    # Check overlap
-                    ox1 = max(d['x'], d2['x'])
-                    oy1 = max(d['y'], d2['y'])
-                    ox2 = min(d['x']+d['w'], d2['x']+d2['w'])
-                    oy2 = min(d['y']+d['h'], d2['y']+d2['h'])
-                    
-                    if ox2 > ox1 and oy2 > oy1:
-                        overlap_area = (ox2-ox1) * (oy2-oy1)
-                        d_area = min(d['w']*d['h'], d2['w']*d2['h'])
-                        
-                        if overlap_area / d_area > 0.3:
-                            cluster.append(d2)
-                            used.add(j)
-                
-                clusters.append(cluster)
+            # Separate letters and symbols
+            letters = [c for c in all_components if c['is_letter'] and not c['is_symbol']]
+            symbols = [c for c in all_components if c['is_symbol']]
+            unknown = [c for c in all_components if not c['is_letter'] and not c['is_symbol']]
             
             progress_bar.progress(90)
-            detail_text.text(f"Found {len(clusters)} unique detection clusters")
+            status.text(f"Letters: {len(letters)} | Symbols: {len(symbols)} | Unknown: {len(unknown)}")
             
-            # For each cluster, keep the best detection
-            unified = []
+            # Mark legend image
+            marked_legend = legend_color.copy()
+            draw = ImageDraw.Draw(marked_legend)
             
-            for cluster in clusters:
-                # Choose the one with highest confidence * score
-                best = max(cluster, key=lambda d: d['conf'] * (1 + d['template_score'] * 0.1))
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+                small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 9)
+            except:
+                font = ImageFont.load_default()
+                small_font = ImageFont.load_default()
+            
+            # Mark symbols in GREEN
+            for i, sym in enumerate(symbols):
+                x1, y1 = sym['x'], sym['y']
+                x2, y2 = sym['x'] + sym['w'], sym['y'] + sym['h']
                 
-                # Average position of all detections in cluster (weighted by confidence)
-                total_conf = sum(d['conf'] for d in cluster)
-                if total_conf > 0:
-                    avg_x = int(sum(d['x'] * d['conf'] for d in cluster) / total_conf)
-                    avg_y = int(sum(d['y'] * d['conf'] for d in cluster) / total_conf)
-                    avg_w = int(sum(d['w'] * d['conf'] for d in cluster) / total_conf)
-                    avg_h = int(sum(d['h'] * d['conf'] for d in cluster) / total_conf)
-                else:
-                    avg_x, avg_y = best['x'], best['y']
-                    avg_w, avg_h = best['w'], best['h']
+                # Green rectangle for symbols
+                draw.rectangle([x1-2, y1-2, x2+2, y2+2], outline='lime', width=3)
                 
-                unified.append({
-                    'x': avg_x,
-                    'y': avg_y,
-                    'w': avg_w,
-                    'h': avg_h,
-                    'conf': best['conf'],
-                    'cluster_size': len(cluster),
-                    'best_score': best['template_score']
-                })
+                # Label
+                label = f"S{i+1}"
+                bbox = draw.textbbox((x1, y1-18), label, font=font)
+                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
+                draw.text((x1, y1-18), label, fill='green', font=font)
             
-            detections = unified
-        else:
-            detections = []
-        
-        progress_bar.progress(95)
-        detail_text.text(f"Unified to {len(detections)} unique receptacles")
-        
-        # Draw results with UNIFIED markers
-        progress_bar.progress(97)
-        detail_text.text("Drawing unified markers...")
-        
-        draw = ImageDraw.Draw(power_color)
-        
-        # Try to load font
-        try:
-            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
-        except:
-            font_large = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-        
-        for i, d in enumerate(detections):
-            x1, y1 = d['x'], d['y']
-            x2, y2 = d['x'] + d['w'], d['y'] + d['h']
+            # Mark letters in RED (to show they're excluded)
+            for i, let in enumerate(letters[:50]):  # Limit to 50 letters shown
+                x1, y1 = let['x'], let['y']
+                x2, y2 = let['x'] + let['w'], let['y'] + let['h']
+                
+                # Red rectangle for letters (excluded)
+                draw.rectangle([x1-1, y1-1, x2+1, y2+1], outline='red', width=1)
+                draw.text((x1, y1-12), "X", fill='red', font=small_font)
             
-            # RED rectangle - thick border
-            draw.rectangle([x1-1, y1-1, x2+1, y2+1], outline='red', width=4)
-            draw.rectangle([x1, y1, x2, y2], outline='#ff0000', width=2)
+            # Mark unknown in YELLOW
+            for i, unk in enumerate(unknown):
+                x1, y1 = unk['x'], unk['y']
+                x2, y2 = unk['x'] + unk['w'], unk['y'] + unk['h']
+                
+                # Yellow dashed for unknown
+                draw.rectangle([x1-1, y1-1, x2+1, y2+1], outline='yellow', width=2)
             
-            # Red semi-transparent fill
-            for dy in range(d['h']):
-                for dx in range(0, d['w'], 3):
-                    if (dx + dy) % 6 < 3:
-                        try:
-                            pixel = power_color.getpixel((x1+dx, y1+dy))
-                            power_color.putpixel((x1+dx, y1+dy), 
-                                               (min(255, pixel[0]+40), pixel[1], pixel[2]))
-                        except:
-                            pass
+            progress_bar.progress(100)
+            status.text("✅ Legend analysis complete!")
             
-            # Number label with white background
-            label = f"R{i+1}"
-            text_bbox = draw.textbbox((x1+3, y1-22), label, font=font_large)
-            # Draw white background
-            draw.rectangle([text_bbox[0]-2, text_bbox[1]-2, 
-                          text_bbox[2]+2, text_bbox[3]+2], fill='white')
-            # Draw red text
-            draw.text((x1+3, y1-22), label, fill='red', font=font_large)
-            
-            # Confidence below
-            conf_label = f"{d['conf']:.0%}"
-            draw.text((x1+3, y1+2), conf_label, fill='red', font=font_small)
+            # Store in session state
+            st.session_state.marked_legend = marked_legend
+            st.session_state.all_symbols = symbols
+            st.session_state.all_letters = letters
+            st.session_state.all_unknown = unknown
+            st.session_state.legend_color = legend_color
+            st.session_state.legend_bin = legend_bin
+            st.session_state.text_bands = text_bands
         
-        progress_bar.progress(100)
-        detail_text.text("✅ Detection complete!")
-        step_status.success("All steps complete!")
-        
-        # ===== DISPLAY RESULTS =====
+        # Show marked legend
+        with col2:
+            st.subheader("Marked Legend")
+            st.image(st.session_state.marked_legend, use_container_width=True)
+            
+            # Legend for colors
+            st.markdown("""
+            - 🟢 **GREEN (S#)** = Potential receptacle symbols
+            - 🔴 **RED (X)** = Letters/Alphabets (EXCLUDED)
+            - 🟡 **YELLOW** = Unknown (needs review)
+            """)
+    
+    # ===== STEP 3: SELECT RECEPTACLES =====
+    if st.session_state.marked_legend is not None:
         st.markdown("---")
+        st.header("🔌 Step 3: Select Which Symbols Are Receptacles")
         
-        if detections:
-            # Big red result box
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #fff5f5 0%, #ffe6e6 100%); 
-                        padding: 30px; border-radius: 15px; 
-                        border: 4px solid #ff0000; text-align: center; margin: 20px 0;
-                        box-shadow: 0 4px 15px rgba(255,0,0,0.2);">
-                <h2 style="color: #cc0000; margin: 0;">🔌 RECEPTACLES DETECTED</h2>
-                <h1 style="color: #ff0000; font-size: 90px; margin: 15px 0; font-weight: 900;">
-                    {len(detections)}
-                </h1>
-                <h3 style="color: #cc0000; margin: 0;">Unique Receptacle Symbols Found</h3>
-                <p style="color: #666; margin-top: 10px;">
-                    Each marked with red rectangle and "R" number
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+        symbols = st.session_state.all_symbols
+        
+        if symbols:
+            st.write(f"Found **{len(symbols)}** potential symbols in legend")
             
-            # Show result image
-            st.image(power_color, 
-                    caption=f"🔴 {len(detections)} Receptacles Marked in RED (no duplicates)",
-                    use_container_width=True)
+            # Show all symbols in a grid
+            st.subheader("Click to select receptacle symbols:")
             
-            # Download options
-            col_a, col_b, col_c = st.columns(3)
+            # Create columns for symbols
+            cols_per_row = 6
+            rows = (len(symbols) + cols_per_row - 1) // cols_per_row
             
-            with col_a:
+            selected = []
+            
+            for row in range(rows):
+                cols = st.columns(cols_per_row)
+                for col_idx in range(cols_per_row):
+                    sym_idx = row * cols_per_row + col_idx
+                    if sym_idx < len(symbols):
+                        sym = symbols[sym_idx]
+                        with cols[col_idx]:
+                            # Show symbol image
+                            sym_img = Image.fromarray(sym['image'].astype(np.uint8) * 255)
+                            st.image(sym_img, width=80)
+                            
+                            # Show info
+                            st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
+                            
+                            # Checkbox to select
+                            is_selected = st.checkbox(
+                                f"Receptacle",
+                                key=f"sym_{sym_idx}",
+                                value=sym.get('is_receptacle', False)
+                            )
+                            
+                            if is_selected:
+                                selected.append(sym_idx)
+            
+            # Confirm selection button
+            if st.button("✅ Confirm Selected Receptacles", type="primary", use_container_width=True):
+                if selected:
+                    st.session_state.confirmed_templates = [symbols[i] for i in selected]
+                    st.session_state.legend_confirmed = True
+                    st.success(f"✅ **{len(selected)} symbols confirmed as receptacles!**")
+                    st.info("Now upload the power plan page to count them.")
+                else:
+                    st.warning("⚠️ Please select at least one receptacle symbol")
+        else:
+            st.warning("No symbols found in legend. Try uploading a clearer image.")
+
+# ===== STEP 4: UPLOAD POWER PLAN & COUNT =====
+if st.session_state.legend_confirmed:
+    st.markdown("---")
+    st.header("🔌 Step 4: Upload Power Plan Page")
+    st.caption("The floor plan where receptacles will be counted")
+    
+    power_file = st.file_uploader(
+        "Upload power plan image",
+        type=['png', 'jpg', 'jpeg', 'tiff', 'bmp'],
+        key='power_upload'
+    )
+    
+    if power_file:
+        power_color = Image.open(power_file).convert('RGB')
+        power_gray = power_color.convert('L')
+        
+        st.subheader("Power Plan")
+        st.image(power_color, use_container_width=True)
+        
+        # ===== STEP 5: COUNT RECEPTACLES =====
+        if st.button("🔍 Count Receptacles in Power Plan", type="primary", use_container_width=True):
+            
+            progress_bar = st.progress(0)
+            status = st.empty()
+            detail = st.empty()
+            
+            # Preprocess power plan
+            status.text("Processing power plan...")
+            progress_bar.progress(10)
+            
+            power_gray = power_gray.filter(ImageFilter.SHARPEN)
+            power_arr = np.array(power_gray)
+            power_bin = (power_arr < 128).astype(np.uint8)
+            
+            h_power, w_power = power_bin.shape
+            
+            # Get confirmed templates
+            templates = st.session_state.confirmed_templates
+            
+            progress_bar.progress(20)
+            status.text(f"Searching with {len(templates)} confirmed receptacle templates...")
+            
+            all_detections = []
+            step_size = max(3, min(h_power, w_power) // 80)
+            
+            for tidx, template in enumerate(templates):
+                progress = 20 + int((tidx / len(templates)) * 50)
+                progress_bar.progress(progress)
+                detail.text(f"Template {tidx+1}/{len(templates)}... Found {len(all_detections)} matches")
+                
+                timg = template['image']
+                th, tw = timg.shape
+                
+                # Multi-scale search
+                for scale in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]:
+                    new_h = int(th * scale)
+                    new_w = int(tw * scale)
+                    
+                    if new_h < 8 or new_w < 8:
+                        continue
+                    if new_h > h_power or new_w > w_power:
+                        continue
+                    
+                    tpil = Image.fromarray(timg.astype(np.uint8) * 255)
+                    tscaled = np.array(tpil.resize((new_w, new_h), Image.Resampling.LANCZOS)) > 128
+                    tscaled = tscaled.astype(np.uint8)
+                    
+                    black_count = np.sum(tscaled)
+                    if black_count < 5:
+                        continue
+                    
+                    for y in range(0, h_power - new_h + 1, step_size):
+                        for x in range(0, w_power - new_w + 1, step_size):
+                            patch = power_bin[y:y+new_h, x:x+new_w]
+                            
+                            if patch.shape != tscaled.shape:
+                                continue
+                            
+                            mask = (tscaled == 1)
+                            match_black = np.sum(patch[mask])
+                            ratio = match_black / black_count
+                            
+                            if ratio >= match_threshold:
+                                all_detections.append({
+                                    'x': int(x),
+                                    'y': int(y),
+                                    'w': new_w,
+                                    'h': new_h,
+                                    'conf': float(ratio)
+                                })
+            
+            progress_bar.progress(75)
+            status.text(f"Raw matches: {len(all_detections)}. Unifying...")
+            
+            # Remove duplicates (unify nearby detections)
+            if all_detections:
+                all_detections.sort(key=lambda d: d['conf'], reverse=True)
+                
+                unified = []
+                used = set()
+                
+                for i, d in enumerate(all_detections):
+                    if i in used:
+                        continue
+                    
+                    cluster = [d]
+                    used.add(i)
+                    
+                    for j, d2 in enumerate(all_detections):
+                        if j in used:
+                            continue
+                        
+                        ox1 = max(d['x'], d2['x'])
+                        oy1 = max(d['y'], d2['y'])
+                        ox2 = min(d['x']+d['w'], d2['x']+d2['w'])
+                        oy2 = min(d['y']+d['h'], d2['y']+d2['h'])
+                        
+                        if ox2 > ox1 and oy2 > oy1:
+                            overlap = (ox2-ox1) * (oy2-oy1)
+                            area = min(d['w']*d['h'], d2['w']*d2['h'])
+                            
+                            if overlap / area > 0.3:
+                                cluster.append(d2)
+                                used.add(j)
+                    
+                    # Average position
+                    total_conf = sum(c['conf'] for c in cluster)
+                    if total_conf > 0:
+                        avg_x = int(sum(c['x'] * c['conf'] for c in cluster) / total_conf)
+                        avg_y = int(sum(c['y'] * c['conf'] for c in cluster) / total_conf)
+                        avg_w = int(sum(c['w'] * c['conf'] for c in cluster) / total_conf)
+                        avg_h = int(sum(c['h'] * c['conf'] for c in cluster) / total_conf)
+                    else:
+                        avg_x, avg_y = d['x'], d['y']
+                        avg_w, avg_h = d['w'], d['h']
+                    
+                    unified.append({
+                        'x': avg_x,
+                        'y': avg_y,
+                        'w': avg_w,
+                        'h': avg_h,
+                        'conf': max(c['conf'] for c in cluster)
+                    })
+                
+                detections = unified
+            else:
+                detections = []
+            
+            progress_bar.progress(90)
+            status.text("Drawing results...")
+            
+            # Draw results in RED
+            result_img = power_color.copy()
+            draw = ImageDraw.Draw(result_img)
+            
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+            except:
+                font = ImageFont.load_default()
+            
+            for i, d in enumerate(detections):
+                x1, y1 = d['x'], d['y']
+                x2, y2 = d['x'] + d['w'], d['y'] + d['h']
+                
+                # RED thick border
+                draw.rectangle([x1-2, y1-2, x2+2, y2+2], outline='red', width=3)
+                
+                # Red semi-transparent fill
+                overlay = Image.new('RGBA', result_img.size, (0,0,0,0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle([x1, y1, x2, y2], fill=(255,0,0,40))
+                result_img = Image.alpha_composite(result_img.convert('RGBA'), overlay).convert('RGB')
+                draw = ImageDraw.Draw(result_img)
+                
+                # Number label
+                label = f"R{i+1}"
+                bbox = draw.textbbox((x1+3, y1-20), label, font=font)
+                draw.rectangle([bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2], fill='white')
+                draw.text((x1+3, y1-20), label, fill='red', font=font)
+            
+            progress_bar.progress(100)
+            status.text("✅ Complete!")
+            
+            # Show results
+            st.markdown("---")
+            
+            if detections:
+                st.markdown(f"""
+                <div style="background:#fff5f5; padding:30px; border-radius:15px; 
+                            border:4px solid red; text-align:center; margin:20px 0;">
+                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
+                    <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
+                    <h3 style="color:#cc0000;">Total Count</h3>
+                    <p style="color:#666;">Marked in RED • No alphabets counted</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.image(result_img, caption=f"{len(detections)} Receptacles (RED markers)", use_container_width=True)
+                
+                # Download
                 buf = io.BytesIO()
-                power_color.save(buf, format='PNG', quality=95)
+                result_img.save(buf, format='PNG')
                 st.download_button(
-                    label="📥 Download Marked Image",
-                    data=buf.getvalue(),
-                    file_name=f"receptacles_marked_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                    mime="image/png",
+                    "📥 Download Result Image",
+                    buf.getvalue(),
+                    f"receptacles_{len(detections)}_found.png",
+                    "image/png",
                     use_container_width=True
                 )
-            
-            with col_b:
-                # Stats
-                st.markdown("### 📊 Quality Stats")
-                confs = [d['conf'] for d in detections]
-                st.metric("Avg Confidence", f"{np.mean(confs):.1%}")
-                st.metric("Max Confidence", f"{np.max(confs):.1%}")
-                st.metric("Detections", len(detections))
-            
-            with col_c:
-                st.markdown("### 🎯 Detection Quality")
-                high = sum(1 for d in detections if d['conf'] > 0.8)
-                med = sum(1 for d in detections if 0.5 <= d['conf'] <= 0.8)
-                low = sum(1 for d in detections if d['conf'] < 0.5)
-                st.write(f"🟢 High confidence: {high}")
-                st.write(f"🟡 Medium confidence: {med}")
-                st.write(f"🔴 Low confidence: {low}")
-            
-            # Detailed table
-            st.markdown("### 📋 Unified Detection List (No Duplicates)")
-            
-            # Create table
-            table_data = []
-            for i, d in enumerate(detections):
-                table_data.append({
-                    "Mark": f"R{i+1}",
-                    "Position": f"({d['x']}, {d['y']})",
-                    "Size": f"{d['w']}×{d['h']}",
-                    "Confidence": f"{d['conf']:.1%}",
-                    "Template Score": f"{d['best_score']}/8",
-                    "Cluster Size": d['cluster_size']
-                })
-            
-            st.dataframe(table_data, use_container_width=True, hide_index=True)
-            
-            st.info(f"""
-            ✅ **Unification Summary:**
-            - {len(detections)} unique receptacles identified
-            - Each marked with RED rectangle and "R" number
-            - No duplicate markings (nearby detections merged)
-            - Letters and text filtered out
-            - Only receptacle-like symbols counted
-            """)
-        
-        else:
-            st.warning("""
-            ### ⚠️ No Receptacles Found
-            
-            **Suggestions:**
-            1. **Lower the sensitivity** (try 0.3 or 0.4)
-            2. **Check legend image** - symbols should be clear
-            3. **Use higher resolution** images
-            4. **Symbols must match** between legend and power plan
-            5. **Ensure good contrast** - dark symbols on light background
-            """)
-
-else:
-    st.info("""
-    ### 👆 Getting Started
-    
-    1. **Upload Legend Page** - The electrical legend showing receptacle symbols
-    2. **Upload Power Plan** - The floor plan where receptacles should be counted
-    3. **Click "Count Receptacles"** to start detection
-    
-    The app will:
-    - Find symbols near text in the legend
-    - Filter out letters and text
-    - Search the power plan for matches
-    - Mark all receptacles with unified RED markers
-    """)
+                
+                # Table
+                st.dataframe(
+                    [{"Mark": f"R{i+1}", "Position": f"({d['x']},{d['y']})", 
+                      "Size": f"{d['w']}×{d['h']}", "Confidence": f"{d['conf']:.0%}"} 
+                     for i, d in enumerate(detections)],
+                    use_container_width=True
+                )
+            else:
+                st.warning("No receptacles found. Try lowering the match sensitivity.")
