@@ -49,15 +49,12 @@ if legend_file:
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
-            # 1. Find TEXT regions using horizontal projection
             binary = (legend_gray < 128).astype(np.uint8)
             row_sums = np.sum(binary, axis=1)
             
-            # Identify rows that contain text (high density of dark pixels)
             text_threshold = np.mean(row_sums) * 0.4
             text_rows = np.where(row_sums > text_threshold)[0]
             
-            # Group consecutive text rows into bands
             text_bands = []
             if len(text_rows) > 0:
                 current_band = [text_rows[0]]
@@ -71,7 +68,6 @@ if legend_file:
                 if len(current_band) > 3:
                     text_bands.append((min(current_band), max(current_band)))
             
-            # 2. For EACH text band, find symbols to the LEFT
             symbols = []
             marked_img = legend_color.copy()
             draw = ImageDraw.Draw(marked_img)
@@ -93,11 +89,9 @@ if legend_file:
                 for i in range(1, num_labels):
                     x, y, bw, bh, area = stats[i]
                     
-                    # Skip if component is on the far right (where text lives)
                     if x > w * 0.55:  
                         continue
                     
-                    # Skip tiny noise
                     if area < 30 or bw < 8 or bh < 8:
                         continue
                     
@@ -109,7 +103,6 @@ if legend_file:
                     
                     symbol_crop = legend_gray[cy1:cy2, cx1:cx2]
                     
-                    # Normalize for template matching
                     target_h = 50
                     scale = target_h / max(1, bh)
                     new_w = max(15, int(bw * scale))
@@ -159,21 +152,20 @@ if st.session_state.get('all_symbols'):
             if sym_idx < len(symbols):
                 sym = symbols[sym_idx]
                 with cols[col_idx]:
-                    # ✅ ROBUST FIX: Use BytesIO buffer to bypass internal resize errors
+                    # ✅ FIX: Resize manually, save to buffer, NO width param on st.image
                     sym_gray = sym['image'].astype(np.uint8)
                     sym_pil = Image.fromarray(sym_gray, mode='L').convert('RGB')
                     
-                    # Scale up slightly for better visibility and stability
-                    sym_pil = sym_pil.resize(
-                        (max(sym_pil.width * 2, 20), max(sym_pil.height * 2, 20)), 
-                        Image.NEAREST
-                    )
+                    # Scale up 3x so it displays clearly without st.image resizing
+                    new_size = (sym_pil.width * 3, sym_pil.height * 3)
+                    sym_pil = sym_pil.resize(new_size, Image.NEAREST)
                     
                     buf = io.BytesIO()
                     sym_pil.save(buf, format='PNG')
                     buf.seek(0)
                     
-                    st.image(buf, width=80)
+                    # ✅ KEY FIX: No width parameter — let Streamlit show at natural size
+                    st.image(buf)
                     
                     st.caption(f"S{sym_idx+1}: {sym['w']}×{sym['h']}px")
                     
@@ -315,7 +307,7 @@ if st.session_state.legend_confirmed:
                 st.markdown(f"""
                 <div style="background:#fff5f5; padding:30px; border-radius:15px; 
                             border:4px solid red; text-align:center; margin:20px 0;">
-                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
+                    <h2 style="color:#cc0000;"> RECEPTACLES FOUND</h2>
                     <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
                     <h3 style="color:#cc0000;">Total Count</h3>
                 </div>
@@ -325,6 +317,6 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
