@@ -6,7 +6,7 @@ import cv2
 
 st.set_page_config(page_title="Receptacle Counter", page_icon="🔌", layout="wide")
 st.title("🔌 Electrical Receptacle Counter")
-st.markdown("Structure-aware detection: Filters out text labels & merges nested shapes.")
+st.markdown("Structure-aware detection: Filters text & separates stacked symbols.")
 
 # Initialize session state
 if 'legend_confirmed' not in st.session_state:
@@ -45,7 +45,7 @@ if legend_file:
         st.subheader("Original Legend")
         st.image(legend_color, use_container_width=True)
     
-    if st.button(" Extract Symbols (Left of Text)", type="primary", use_container_width=True):
+    if st.button("🔍 Extract Symbols (Left of Text)", type="primary", use_container_width=True):
         with st.spinner("Analyzing legend structure..."):
             h, w = legend_gray.shape
             
@@ -95,18 +95,12 @@ if legend_file:
                         continue
                     
                     # ✅ FIX: TEXT FILTER
-                    # Text characters usually have low "fill ratio" (lots of white space inside bounding box)
-                    # OR they are very thin (high aspect ratio). 
-                    # Symbols like circles/squares are "blockier".
+                    # Text characters usually have low "fill ratio" or are very thin
                     fill_ratio = area / (bw * bh)
-                    aspect_ratio = max(bw, bh) / min(bw, bh)
                     
-                    # If it's very thin (like a letter 'I' or 'l') or very empty (like 'O' or '0' text), skip it
-                    # BUT we must be careful not to skip thin symbol lines. 
-                    # Heuristic: Text is usually < 15px wide. Symbols are often wider or have higher fill.
-                    # A better heuristic for legends: Text is usually isolated. Symbols might be complex.
-                    # Let's use a simple rule: If width < 12 AND height < 20, it's likely a label like "S2".
-                    if bw < 12 and bh < 20 and fill_ratio < 0.6:
+                    # Heuristic: Text labels like "S2" are usually small (<15px wide) AND have low fill
+                    # Symbols like circles/squares are either larger or have higher fill
+                    if bw < 15 and bh < 20 and fill_ratio < 0.5:
                         continue
 
                     raw_components.append({
@@ -114,7 +108,7 @@ if legend_file:
                         'area': area, 'band_y1': sy1, 'band_y2': sy2
                     })
 
-            # ✅ FIX: MERGE NEARBY COMPONENTS (Handles Nested Rectangles)
+            # ✅ FIX: MERGE NEARBY COMPONENTS (Handles Nested Rectangles ONLY)
             merged_symbols = []
             used_indices = set()
             
@@ -135,16 +129,27 @@ if legend_file:
                     cx1, cy1, cw1, ch1 = comp['x'], comp['y'], comp['w'], comp['h']
                     cx2, cy2, cw2, ch2 = other['x'], other['y'], other['w'], other['h']
                     
-                    # Check proximity
-                    x_dist = abs(cx1 - cx2)
-                    y_dist = abs(cy1 - cy2)
+                    # Calculate centers
+                    center1_y = cy1 + ch1/2
+                    center2_y = cy2 + ch2/2
                     
-                    # If close enough to be part of same symbol
-                    if x_dist < (max(cw1, cw2) + 8) and y_dist < (max(ch1, ch2) + 8):
-                         y_overlap = min(cy1+ch1, cy2+ch2) - max(cy1, cy2)
-                         if y_overlap > -5: # Allow slight vertical misalignment
-                             group.append(other)
-                             used_indices.add(j)
+                    # ✅ CRITICAL FIX: VERTICAL SEPARATION CHECK
+                    # Only merge if they are roughly at the SAME vertical level
+                    # If one is significantly above/below the other, DO NOT merge (they are stacked symbols)
+                    y_dist = abs(center1_y - center2_y)
+                    max_height = max(ch1, ch2)
+                    
+                    # If vertical distance is greater than 1.5x the height, they are separate stacked symbols
+                    if y_dist > max_height * 1.5:
+                        continue
+                        
+                    # Check horizontal proximity (for nested rectangles)
+                    x_dist = abs(cx1 - cx2)
+                    
+                    # If close horizontally AND vertically aligned, merge them
+                    if x_dist < (max(cw1, cw2) + 10):
+                         group.append(other)
+                         used_indices.add(j)
                 
                 # Create unified bounding box
                 min_x = min(c['x'] for c in group)
@@ -203,17 +208,17 @@ if legend_file:
             st.session_state.all_symbols = symbols
             st.session_state.text_bands = text_bands
             
-            st.success(f"✅ Found {len(symbols)} symbols (Text labels filtered out)")
+            st.success(f"✅ Found {len(symbols)} symbols (Stacked symbols separated)")
         
         with col2:
             st.subheader("Extracted Symbols (Green Boxes)")
             st.image(st.session_state.marked_legend, use_container_width=True)
-            st.caption("Text labels like 'S2' are ignored. Nested shapes are merged.")
+            st.caption("Nested shapes merged. Stacked shapes kept separate.")
 
 # ===== STEP 3: SELECT RECEPTACLES =====
 if st.session_state.get('all_symbols'):
     st.markdown("---")
-    st.header("🔌 Step 3: Select Which Symbols Are Receptacles")
+    st.header(" Step 3: Select Which Symbols Are Receptacles")
     
     symbols = st.session_state.all_symbols
     st.write(f"Found **{len(symbols)}** true symbols in legend")
@@ -262,12 +267,12 @@ if st.session_state.get('all_symbols'):
             st.session_state.legend_confirmed = True
             st.success(f"✅ **{len(selected_indices)} receptacles confirmed!**")
         else:
-            st.warning("⚠️ Please select at least one symbol")
+            st.warning("️ Please select at least one symbol")
 
 # ===== STEP 4 & 5: COUNT IN POWER PLAN =====
 if st.session_state.legend_confirmed:
     st.markdown("---")
-    st.header("🔌 Step 4: Upload Power Plan")
+    st.header(" Step 4: Upload Power Plan")
     power_file = st.file_uploader("Upload power plan", type=['png', 'jpg', 'jpeg'], key='power_upload')
     
     if power_file:
@@ -386,7 +391,7 @@ if st.session_state.legend_confirmed:
                 st.markdown(f"""
                 <div style="background:#fff5f5; padding:30px; border-radius:15px; 
                             border:4px solid red; text-align:center; margin:20px 0;">
-                    <h2 style="color:#cc0000;">🔌 RECEPTACLES FOUND</h2>
+                    <h2 style="color:#cc0000;"> RECEPTACLES FOUND</h2>
                     <h1 style="color:red; font-size:80px; margin:15px 0;">{len(detections)}</h1>
                     <h3 style="color:#cc0000;">Total Count</h3>
                 </div>
@@ -396,6 +401,6 @@ if st.session_state.legend_confirmed:
                 
                 buf = io.BytesIO()
                 result_img.save(buf, format='PNG')
-                st.download_button("📥 Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
+                st.download_button(" Download Result", buf.getvalue(), "receptacles_found.png", "image/png")
             else:
                 st.warning("No receptacles found. Try lowering sensitivity.")
